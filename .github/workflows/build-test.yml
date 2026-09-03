@@ -1,0 +1,73 @@
+name: Build ImageGlass test artifact
+
+on:
+  push:
+    branches:
+      - "ci/**"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Show environment
+        shell: pwsh
+        run: dotnet --info
+
+      - name: Restore
+        shell: pwsh
+        run: >
+          dotnet restore
+          source/ImageGlass.Win32/ImageGlass.Win32.csproj
+          -p:Platform=x64
+
+      - name: Build with repository settings
+        shell: pwsh
+        run: >
+          dotnet build
+          source/ImageGlass.Win32/ImageGlass.Win32.csproj
+          -c Debug
+          -p:Platform=x64
+          --no-restore
+
+      - name: Publish runnable smoke-test build
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP "ImageGlass"
+
+          dotnet publish `
+            source/ImageGlass.Win32/ImageGlass.Win32.csproj `
+            -c Debug `
+            -p:Platform=x64 `
+            -p:PublishAot=false `
+            -p:PublishReadyToRun=false `
+            -p:PublishSingleFile=false `
+            -p:PublishTrimmed=false `
+            -p:SelfContained=true `
+            -o $output
+
+          Copy-Item `
+            "source/__assets/__app/_themes" `
+            (Join-Path $output "_themes") `
+            -Recurse `
+            -Force
+
+      - name: Upload runnable build
+        uses: actions/upload-artifact@v7
+        with:
+          name: ImageGlass-win-x64-test
+          path: ${{ runner.temp }}/ImageGlass
+          retention-days: 7
+          if-no-files-found: error
