@@ -505,13 +505,6 @@ public partial class Photo : PhDisposable
     }
 
 
-    private MagickReadSettings GetOrCreateMagickReadSettings()
-    {
-        ReadSettings ??= MagickCodec.ParseSettings(ReadOptions, false, FilePath);
-        return ReadSettings;
-    }
-
-
     /// <summary>
     /// Handles the decoding of image files based on their metadata.
     /// </summary>
@@ -896,7 +889,7 @@ public partial class Photo : PhDisposable
 
             // Fallback: legacy direct-Magick path (e.g. SVG vector codec returned no raster).
             using var data = await MagickCodec.DecodeImageAsync(Metadata,
-                options, GetOrCreateMagickReadSettings(), null, CancellationToken.None);
+                options, ReadSettings, null, CancellationToken.None);
             return SkiaCodec.FromMagick(data.SingleFrame, Metadata.SkiaColorSpace, Metadata.IsHdr);
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
 
@@ -949,7 +942,7 @@ public partial class Photo : PhDisposable
 
             // fallback: direct Magick decode
             using var data = await MagickCodec.DecodeImageAsync(Metadata, options,
-                GetOrCreateMagickReadSettings(), null, token);
+                ReadSettings, null, token);
             return SkiaCodec.FromMagick(data.SingleFrame, Metadata.SkiaColorSpace, Metadata.IsHdr);
         }, token, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
     }

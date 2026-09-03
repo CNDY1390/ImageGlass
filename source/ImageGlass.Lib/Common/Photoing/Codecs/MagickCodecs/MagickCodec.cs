@@ -70,7 +70,8 @@ public static partial class MagickCodec
     /// Parse <see cref="PhotoReadOptions"/> to <see cref="MagickReadSettings"/>.
     /// </summary>
     public static MagickReadSettings ParseSettings(PhotoReadOptions? options,
-        bool writePurpose, string filePath = "")
+        bool writePurpose, string filePath = "",
+        MagickFormat detectedFormat = MagickFormat.Unknown)
     {
         options ??= new();
         var ext = Path.GetExtension(filePath).ToUpperInvariant();
@@ -143,6 +144,13 @@ public static partial class MagickCodec
         else if (ext.Equals(".APNG", StringComparison.Ordinal))
         {
             settings.Format = MagickFormat.APng;
+        }
+
+        // the extension is only a hint: prefer the format the content probe already identified
+        if (settings.Format == MagickFormat.Unknown
+            && detectedFormat != MagickFormat.Unknown)
+        {
+            settings.Format = detectedFormat;
         }
 
 
@@ -310,6 +318,7 @@ public static partial class MagickCodec
         if (frameIndex >= imgC.Count) frameIndex = 0;
         else if (frameIndex < 0) frameIndex = imgC.Count - 1;
 
+        meta.DetectedMagickFormat = imgC[frameIndex].Format;
         meta.FrameCount = (uint)imgC.Count;
 
 
@@ -482,7 +491,7 @@ public static partial class MagickCodec
 
 
         // 0. parse settings, make sure the frame index is correct
-        settings ??= ParseSettings(options, false, meta.FilePath);
+        settings ??= ParseSettings(options, false, meta.FilePath, meta.DetectedMagickFormat);
         if (options.FrameIndex >= 0)
         {
             settings.FrameIndex = (uint)options.FrameIndex;
@@ -537,7 +546,17 @@ public static partial class MagickCodec
                     if (imgM.Width > options.PreviewMinWidth
                         && imgM.Height > options.PreviewMinHeight)
                     {
-                        imgM.Read(thumbSpan, settings);
+                        // the thumbnail is a separate blob, so the container format must not be forced on it
+                        var containerFormat = settings.Format;
+                        settings.Format = MagickFormat.Unknown;
+                        try
+                        {
+                            imgM.Read(thumbSpan, settings);
+                        }
+                        finally
+                        {
+                            settings.Format = containerFormat;
+                        }
                         hasRequestedThumbnail = true;
                     }
                 }
@@ -595,13 +614,15 @@ public static partial class MagickCodec
             Width = (uint)desiredWidth,
             Height = (uint)desiredHeight,
         };
-        var settings = ParseSettings(options, false, filePath);
+        var probeSettings = ParseSettings(options, false, filePath);
+        var detectedFormat = MagickFormat.Unknown;
 
         // ping a throwaway image: reading into a pinged instance double-frees on teardown
         try
         {
             using var probeM = new MagickImage();
-            probeM.Ping(filePath, settings);
+            probeM.Ping(filePath, probeSettings);
+            detectedFormat = probeM.Format;
 
             // check the dimention constraint
             if (probeM.Width < minSize
@@ -614,6 +635,7 @@ public static partial class MagickCodec
         if (token.IsCancellationRequested) return null;
 
 
+        var settings = ParseSettings(options, false, filePath, detectedFormat);
         var imgM = new MagickImage();
         try
         {
@@ -772,7 +794,7 @@ public static partial class MagickCodec
 
 
             // 2. read the photo
-            var settings = ParseSettings(options, true, meta.FilePath);
+            var settings = ParseSettings(options, true, meta.FilePath, meta.DetectedMagickFormat);
             using var result = await DecodeImageAsync(meta, options with
             {
                 // Magick.NET auto-corrects the rotation when saving,

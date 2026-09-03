@@ -98,6 +98,11 @@ public partial class PhotoMetadata : PhDisposable
     public double DpiX { get; set; } = 0;
     public double DpiY { get; set; } = 0;
 
+    /// <summary>
+    /// Gets, sets the image format the Magick metadata probe detected from the file content.
+    /// </summary>
+    internal MagickFormat DetectedMagickFormat { get; set; } = MagickFormat.Unknown;
+
     public uint FrameCount { get; set; } = 0;
     public string FrameCountFormatted => FrameCount > 1 ? FrameCount.ToString() : string.Empty;
     public uint AnimationLoop { get; set; } = 0;
@@ -236,6 +241,7 @@ public partial class PhotoMetadata : PhDisposable
 
         RawThumbnail = null;
         ExifProfile = null;
+        DetectedMagickFormat = MagickFormat.Unknown;
         FrameCount = 0;
         Frames.Clear();
 
