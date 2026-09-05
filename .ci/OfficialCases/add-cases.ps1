@@ -10,8 +10,24 @@ $prepare = @'
         using var officialCases = JsonDocument.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("OFFICIAL_CASES")!));
         foreach (var sample in officialCases.RootElement.EnumerateArray())
         {
-            var data = Convert.FromBase64String(sample.GetProperty("bytes").GetString()!);
-            Check(Hash(data).Equals(sample.GetProperty("sha256").GetString(), StringComparison.OrdinalIgnoreCase), "Official sample checksum mismatch");
+            byte[] data;
+            if (sample.TryGetProperty("bytes", out var encoded))
+            {
+                data = Convert.FromBase64String(encoded.GetString()!);
+            }
+            else
+            {
+                using var client = new System.Net.Http.HttpClient();
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("ImageGlass-PR2446-fixture/1.0");
+                var downloaded = await client.GetByteArrayAsync(sample.GetProperty("url").GetString()!);
+                using var sourceZip = new ZipArchive(new MemoryStream(downloaded));
+                var entry = sourceZip.GetEntry(sample.GetProperty("entry").GetString()!) ?? throw new InvalidDataException("Missing original fixture");
+                using var entryStream = entry.Open();
+                using var extracted = new MemoryStream();
+                await entryStream.CopyToAsync(extracted);
+                data = extracted.ToArray();
+            }
+            Check(Hash(data).Equals(sample.GetProperty("sha256").GetString(), StringComparison.OrdinalIgnoreCase), "Official sample checksum mismatch: " + sample.GetProperty("input").GetString());
             File.WriteAllBytes(Path.Combine(root, sample.GetProperty("input").GetString()!), data);
             File.WriteAllBytes(Path.Combine(root, sample.GetProperty("canonical").GetString()!), data);
         }
