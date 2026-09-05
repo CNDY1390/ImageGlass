@@ -1,110 +1,109 @@
-name: Build signed PR 04dcbb6
+name: Compare current base and PR merge on Magick 14.14
 
 on:
   push:
-    branches:
-      - ci/content-sniff-fallback
+    branches: [ci/content-sniff-fallback]
 
 permissions:
   contents: read
 
 concurrency:
-  group: signed-pr-04dcbb6
+  group: pr2446-base-merge-1414
   cancel-in-progress: false
 
-env:
-  SOURCE_SHA: 04dcbb640d42f483807a1904c0c9c1e699c4a2a2
-
 jobs:
-  windows-x64:
+  compare:
     if: github.repository == 'CNDY1390/ImageGlass'
     runs-on: windows-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kind: base
+            sha: cb390f5419993806f306ccc00feaf8daf392c491
+          - kind: merge
+            sha: f493e2c9f01d78df540c636d62b47f0a93ee4dec
+    name: ${{ matrix.kind }} - Magick.NET 14.14.0
+    env:
+      SOURCE_KIND: ${{ matrix.kind }}
+      SOURCE_SHA: ${{ matrix.sha }}
+      EXPECTED_MAGICK: 14.14.0
     steps:
-      - name: Checkout CI harness only
+      - name: Checkout external harness
         uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
           path: harness
+          sparse-checkout: .ci/BaseMergeSmoke
           persist-credentials: false
-          sparse-checkout: .ci
-
-      - name: Checkout exact signed PR source
+      - name: Checkout pinned source without modification
         uses: actions/checkout@v6
         with:
-          ref: 04dcbb640d42f483807a1904c0c9c1e699c4a2a2
+          repository: d2phap/ImageGlass
+          ref: ${{ matrix.sha }}
           path: app
           persist-credentials: false
-
-      - name: Record and verify source identity
+      - name: Verify revision and dependency identity
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           $actual = (git -C app rev-parse HEAD).Trim()
-          if ($actual -ne $env:SOURCE_SHA) { throw "Wrong source checkout: $actual" }
-          $commit = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' } -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/git/commits/$actual"
-          if (-not $commit.verification.verified) { throw 'Source commit is not verified by GitHub' }
+          if ($actual -ne $env:SOURCE_SHA) { throw "Unexpected revision: $actual" }
+          [xml]$packages = Get-Content 'app/source/Directory.Packages.props'
+          $versions = @($packages.Project.ItemGroup.PackageVersion | Where-Object { $_.Include -like 'Magick.NET-*' } | ForEach-Object { $_.Version } | Select-Object -Unique)
+          if ($versions.Count -ne 1 -or $versions[0] -ne $env:EXPECTED_MAGICK) { throw "Unexpected Magick versions: $versions" }
+          $commit = (git -C app cat-file -p HEAD) -join "`n"
+          if ($env:SOURCE_KIND -eq 'merge' -and ($commit -notmatch 'parent cb390f5419993806f306ccc00feaf8daf392c491' -or $commit -notmatch 'parent 04dcbb640d42f483807a1904c0c9c1e699c4a2a2')) { throw 'Unexpected merge parents' }
           @{
             source_sha = $actual
-            source_tree = $commit.tree.sha
-            signature_verified = $commit.verification.verified
+            source_kind = $env:SOURCE_KIND
+            source_tree = (git -C app rev-parse 'HEAD^{tree}').Trim()
+            magick_package = $versions[0]
             workflow_sha = $env:GITHUB_SHA
             run_url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/source.json" -Encoding utf8
           Get-Content "$env:RUNNER_TEMP/source.json"
-          git -C app diff --exit-code HEAD -- source
-          if ($LASTEXITCODE -ne 0) { throw 'Source is modified' }
-
       - name: Install .NET 10
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
-
-      - name: Build exact PR source on Windows x64
+      - name: Build Windows application
         shell: pwsh
         run: |
           dotnet --info
           dotnet build app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 2>&1 | Tee-Object "$env:RUNNER_TEMP/build.log"
           if ($LASTEXITCODE -ne 0) { throw "Build failed: $LASTEXITCODE" }
-
-      - name: Publish exact PR source
+      - name: Publish source under test
         shell: pwsh
         run: |
-          $output = Join-Path $env:RUNNER_TEMP 'ImageGlass-04dcbb6-win-x64'
-          dotnet publish app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 -p:PublishAot=false -p:PublishReadyToRun=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:SelfContained=true -o $output 2>&1 | Tee-Object "$env:RUNNER_TEMP/publish.log"
+          dotnet publish app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 -p:PublishAot=false -p:PublishReadyToRun=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:SelfContained=true -o "$env:RUNNER_TEMP/ImageGlass" 2>&1 | Tee-Object "$env:RUNNER_TEMP/publish.log"
           if ($LASTEXITCODE -ne 0) { throw "Publish failed: $LASTEXITCODE" }
-
-      - name: Build external smoke-test runner
+      - name: Build independent observation runner
         shell: pwsh
         run: |
           $project = Join-Path $env:GITHUB_WORKSPACE 'app/source/ImageGlass.Lib/ImageGlass.Lib.csproj'
-          $smoke = Join-Path $env:RUNNER_TEMP 'inline-smoke'
-          dotnet build harness/.ci/InlineSmoke/InlineSmoke.csproj -c Debug -p:Platform=x64 -p:PublishAot=false "-p:ImageGlassProject=$project" -o $smoke 2>&1 | Tee-Object "$env:RUNNER_TEMP/test-build.log"
-          if ($LASTEXITCODE -ne 0) { throw "Test runner build failed: $LASTEXITCODE" }
-          Copy-Item "$env:RUNNER_TEMP/ImageGlass-04dcbb6-win-x64/ImageGlass.Lib.dll" $smoke -Force
-          Copy-Item "$env:RUNNER_TEMP/ImageGlass-04dcbb6-win-x64/ImageGlass.Lib.pdb" $smoke -Force -ErrorAction SilentlyContinue
-
-      - name: Test the DLL shipped in the download
+          dotnet build harness/.ci/BaseMergeSmoke/BaseMergeSmoke.csproj -c Debug -p:Platform=x64 -p:PublishAot=false "-p:ImageGlassProject=$project" -o "$env:RUNNER_TEMP/runner" 2>&1 | Tee-Object "$env:RUNNER_TEMP/test-build.log"
+          if ($LASTEXITCODE -ne 0) { throw "Runner build failed: $LASTEXITCODE" }
+          Copy-Item "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" "$env:RUNNER_TEMP/runner" -Force
+          Copy-Item "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.pdb" "$env:RUNNER_TEMP/runner" -Force -ErrorAction SilentlyContinue
+      - name: Observe identical samples and check actual loaded version
         shell: pwsh
         run: |
-          $env:EXPECTED_LIB_SHA256 = (Get-FileHash "$env:RUNNER_TEMP/ImageGlass-04dcbb6-win-x64/ImageGlass.Lib.dll" -Algorithm SHA256).Hash
-          dotnet "$env:RUNNER_TEMP/inline-smoke/InlineSmoke.dll" "$env:RUNNER_TEMP/inline-fixtures" 2>&1 | Tee-Object "$env:RUNNER_TEMP/smoke.log"
-          if ($LASTEXITCODE -ne 0) { throw "Smoke tests failed: $LASTEXITCODE" }
+          $env:EXPECTED_LIB_SHA256 = (Get-FileHash "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" -Algorithm SHA256).Hash
+          dotnet "$env:RUNNER_TEMP/runner/BaseMergeSmoke.dll" "$env:RUNNER_TEMP/fixtures" "$env:RUNNER_TEMP/observations.json" 2>&1 | Tee-Object "$env:RUNNER_TEMP/observations.log"
+          if ($LASTEXITCODE -ne 0) { throw "Observation checks failed: $LASTEXITCODE" }
           git -C app diff --exit-code HEAD -- source
-          if ($LASTEXITCODE -ne 0) { throw 'Tests modified production source' }
-          "Tested source: $env:SOURCE_SHA" >> $env:GITHUB_STEP_SUMMARY
-          "Published ImageGlass.Lib.dll SHA256: $env:EXPECTED_LIB_SHA256" >> $env:GITHUB_STEP_SUMMARY
-          Get-Content "$env:RUNNER_TEMP/smoke.log" | Select-String '^RESULT:' | ForEach-Object { $_.Line >> $env:GITHUB_STEP_SUMMARY }
-
-      - name: Package portable build and evidence
+          if ($LASTEXITCODE -ne 0) { throw 'Production source changed' }
+          "Source: $env:SOURCE_KIND $env:SOURCE_SHA; loaded Magick.NET must be $env:EXPECTED_MAGICK" >> $env:GITHUB_STEP_SUMMARY
+          Get-Content "$env:RUNNER_TEMP/observations.log" | Select-String '^(OBS:|RESULT:|MAGICK:)' | ForEach-Object { $_.Line >> $env:GITHUB_STEP_SUMMARY }
+      - name: Package isolated portable application
         shell: pwsh
         run: |
-          $output = Join-Path $env:RUNNER_TEMP 'ImageGlass-04dcbb6-win-x64'
+          $output = Join-Path $env:RUNNER_TEMP 'ImageGlass'
           Copy-Item 'app/source/__assets/__app/*' $output -Recurse -Force
           [IO.File]::WriteAllBytes((Join-Path $output '.igportable'), [byte[]]@())
           @{
-            _Metadata = @{ Description = 'ImageGlass test configuration'; Version = 10 }
+            _Metadata = @{ Description = 'Isolated PR comparison configuration'; Version = 10 }
             QuickSetupVersion = 10
             AutoUpdate = '0'
             EnableMultiInstances = $true
@@ -112,42 +111,29 @@ jobs:
             EnableLastSeenImage = $false
             EnableGalleryShellThumbnail = $false
           } | ConvertTo-Json | Set-Content (Join-Path $output 'igconfig.json') -Encoding utf8
-          Copy-Item "$env:RUNNER_TEMP/inline-fixtures" (Join-Path $output '_test_samples') -Recurse -Force
+          Copy-Item "$env:RUNNER_TEMP/fixtures" (Join-Path $output '_test_samples') -Recurse -Force
           $results = New-Item -ItemType Directory -Path (Join-Path $output '_test_results') -Force
-          Copy-Item "$env:RUNNER_TEMP/source.json", "$env:RUNNER_TEMP/build.log", "$env:RUNNER_TEMP/publish.log", "$env:RUNNER_TEMP/test-build.log", "$env:RUNNER_TEMP/smoke.log" $results.FullName
-          @(
-            "Source commit: $env:SOURCE_SHA"
-            "Actions run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-            'Extract the entire ZIP into a new writable folder and run ImageGlass.exe.'
-            'The .igportable marker isolates settings from Scoop and AppData.'
-            'Use File > Open to test png-content.tif, webp-content.jpg and png-first-frame.ico in _test_samples.'
-            'The ICO contains four sizes. Ctrl+Right switches frames; P opens frame navigation.'
-            'ico-content.tif and corrupt.tif are expected failures, not positive samples.'
-            'Automated tests use the same ImageGlass.Lib.dll included in this ZIP. See _test_results/smoke.log.'
-            'Windows GUI interaction, real RAW, PS/PDF and concurrent cancellation races have not been tested here.'
-          ) | Set-Content (Join-Path $output 'TEST-BUILD.txt') -Encoding utf8
-          git -C app diff --exit-code HEAD -- source
-          if ($LASTEXITCODE -ne 0) { throw 'Packaging modified production source' }
-
-      - name: Upload Windows build
+          Copy-Item "$env:RUNNER_TEMP/source.json", "$env:RUNNER_TEMP/observations.json", "$env:RUNNER_TEMP/observations.log" $results.FullName
+          @("Source: $env:SOURCE_KIND $env:SOURCE_SHA", 'Magick.NET: 14.14.0', "Run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID", 'This is an isolated comparison build, not an official release.', 'Extract the whole ZIP to a new writable folder and run ImageGlass.exe.', 'Metadata-probe observations are recorded, not assumed to fail.', 'GUI, real RAW, PS/PDF and concurrent cancellation have not been tested.') | Set-Content (Join-Path $output 'TEST-BUILD.txt') -Encoding utf8
+      - name: Upload portable comparison build
         uses: actions/upload-artifact@v7
         with:
-          name: ImageGlass-04dcbb6-win-x64
-          path: ${{ runner.temp }}/ImageGlass-04dcbb6-win-x64
+          name: ImageGlass-${{ matrix.kind }}-14.14.0-win-x64
+          path: ${{ runner.temp }}/ImageGlass
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
-
-      - name: Upload logs even on failure
+      - name: Upload evidence even on failure
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: validation-04dcbb6
+          name: validation-${{ matrix.kind }}-14.14.0
           path: |
             ${{ runner.temp }}/source.json
+            ${{ runner.temp }}/observations.json
+            ${{ runner.temp }}/observations.log
             ${{ runner.temp }}/build.log
             ${{ runner.temp }}/publish.log
             ${{ runner.temp }}/test-build.log
-            ${{ runner.temp }}/smoke.log
           if-no-files-found: warn
           retention-days: 14
