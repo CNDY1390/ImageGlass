@@ -493,8 +493,7 @@ public static partial class MagickCodec
         // 1. read all frames if requested
         if (options.FrameIndex < 0)
         {
-            var imgColl = new MagickImageCollection();
-            await imgColl.ReadAsync(meta.FilePath, settings, cancelToken);
+            var imgColl = await ReadImageCollectionFileAsync__(meta.FilePath, settings, cancelToken).ConfigureAwait(false);
 
             var i = 0;
             foreach (var imgFrameM in imgColl)
@@ -550,7 +549,7 @@ public static partial class MagickCodec
         if (!hasRequestedThumbnail)
         {
             imgM.Dispose();
-            await imgM.ReadAsync(meta.FilePath, settings, cancelToken);
+            imgM = await ReadImageFileAsync__(meta.FilePath, settings, cancelToken).ConfigureAwait(false);
         }
 
 
@@ -614,17 +613,12 @@ public static partial class MagickCodec
         if (token.IsCancellationRequested) return null;
 
 
-        var imgM = new MagickImage();
         try
         {
-            await imgM.ReadAsync(filePath, settings, token);
-            token.ThrowIfCancellationRequested();
-
-            return imgM;
+            return await ReadImageFileAsync__(filePath, settings, token).ConfigureAwait(false);
         }
         catch
         {
-            imgM.Dispose();
             return null;
         }
     }
