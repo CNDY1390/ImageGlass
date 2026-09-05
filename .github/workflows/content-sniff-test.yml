@@ -1,4 +1,4 @@
-name: Build content-sniff fallback test
+name: Build signed PR 04dcbb6
 
 on:
   push:
@@ -6,11 +6,14 @@ on:
       - ci/content-sniff-fallback
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: content-sniff-fallback-test
+  group: signed-pr-04dcbb6
   cancel-in-progress: false
+
+env:
+  SOURCE_SHA: 04dcbb640d42f483807a1904c0c9c1e699c4a2a2
 
 jobs:
   windows-x64:
@@ -18,41 +21,90 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout authorized test branch
+      - name: Checkout CI harness only
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: harness
+          persist-credentials: false
+          sparse-checkout: .ci
+
+      - name: Checkout exact signed PR source
+        uses: actions/checkout@v6
+        with:
+          ref: 04dcbb640d42f483807a1904c0c9c1e699c4a2a2
+          path: app
+          persist-credentials: false
+
+      - name: Record and verify source identity
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $actual = (git -C app rev-parse HEAD).Trim()
+          if ($actual -ne $env:SOURCE_SHA) { throw "Wrong source checkout: $actual" }
+          $commit = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' } -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/git/commits/$actual"
+          if (-not $commit.verification.verified) { throw 'Source commit is not verified by GitHub' }
+          @{
+            source_sha = $actual
+            source_tree = $commit.tree.sha
+            signature_verified = $commit.verification.verified
+            workflow_sha = $env:GITHUB_SHA
+            run_url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/source.json" -Encoding utf8
+          Get-Content "$env:RUNNER_TEMP/source.json"
+          git -C app diff --exit-code HEAD -- source
+          if ($LASTEXITCODE -ne 0) { throw 'Source is modified' }
 
       - name: Install .NET 10
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
 
-      - name: Apply and commit exact source wiring on the test branch
-        shell: pwsh
-        run: ./.ci/prepare-content-fallback.ps1
-
-      - name: Build Windows application
+      - name: Build exact PR source on Windows x64
         shell: pwsh
         run: |
           dotnet --info
-          dotnet build source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 2>&1 | Tee-Object "$env:RUNNER_TEMP/build.log"
-          if ($LASTEXITCODE -ne 0) { throw "Windows build failed: $LASTEXITCODE" }
+          dotnet build app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 2>&1 | Tee-Object "$env:RUNNER_TEMP/build.log"
+          if ($LASTEXITCODE -ne 0) { throw "Build failed: $LASTEXITCODE" }
 
-      - name: Run actual-library and failure-injection smoke tests
+      - name: Publish exact PR source
         shell: pwsh
         run: |
-          dotnet run --project .ci/ContentSniffSmoke/ContentSniffSmoke.csproj -c Debug -p:Platform=x64 -- "$env:RUNNER_TEMP/smoke-fixtures" 2>&1 | Tee-Object "$env:RUNNER_TEMP/smoke.log"
-          if ($LASTEXITCODE -ne 0) { throw "Smoke tests failed: $LASTEXITCODE" }
-
-      - name: Publish isolated portable test build
-        shell: pwsh
-        run: |
-          $output = Join-Path $env:RUNNER_TEMP 'ImageGlass-content-sniff-fallback'
-          dotnet publish source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 -p:PublishAot=false -p:PublishReadyToRun=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:SelfContained=true -o $output
+          $output = Join-Path $env:RUNNER_TEMP 'ImageGlass-04dcbb6-win-x64'
+          dotnet publish app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 -p:PublishAot=false -p:PublishReadyToRun=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:SelfContained=true -o $output 2>&1 | Tee-Object "$env:RUNNER_TEMP/publish.log"
           if ($LASTEXITCODE -ne 0) { throw "Publish failed: $LASTEXITCODE" }
-          Copy-Item 'source/__assets/__app/*' $output -Recurse -Force
+
+      - name: Build external smoke-test runner
+        shell: pwsh
+        run: |
+          $project = Join-Path $env:GITHUB_WORKSPACE 'app/source/ImageGlass.Lib/ImageGlass.Lib.csproj'
+          $smoke = Join-Path $env:RUNNER_TEMP 'inline-smoke'
+          dotnet build harness/.ci/InlineSmoke/InlineSmoke.csproj -c Debug -p:Platform=x64 -p:PublishAot=false "-p:ImageGlassProject=$project" -o $smoke 2>&1 | Tee-Object "$env:RUNNER_TEMP/test-build.log"
+          if ($LASTEXITCODE -ne 0) { throw "Test runner build failed: $LASTEXITCODE" }
+          Copy-Item "$env:RUNNER_TEMP/ImageGlass-04dcbb6-win-x64/ImageGlass.Lib.dll" $smoke -Force
+          Copy-Item "$env:RUNNER_TEMP/ImageGlass-04dcbb6-win-x64/ImageGlass.Lib.pdb" $smoke -Force -ErrorAction SilentlyContinue
+
+      - name: Test the DLL shipped in the download
+        shell: pwsh
+        run: |
+          $env:EXPECTED_LIB_SHA256 = (Get-FileHash "$env:RUNNER_TEMP/ImageGlass-04dcbb6-win-x64/ImageGlass.Lib.dll" -Algorithm SHA256).Hash
+          dotnet "$env:RUNNER_TEMP/inline-smoke/InlineSmoke.dll" "$env:RUNNER_TEMP/inline-fixtures" 2>&1 | Tee-Object "$env:RUNNER_TEMP/smoke.log"
+          if ($LASTEXITCODE -ne 0) { throw "Smoke tests failed: $LASTEXITCODE" }
+          git -C app diff --exit-code HEAD -- source
+          if ($LASTEXITCODE -ne 0) { throw 'Tests modified production source' }
+          "Tested source: $env:SOURCE_SHA" >> $env:GITHUB_STEP_SUMMARY
+          "Published ImageGlass.Lib.dll SHA256: $env:EXPECTED_LIB_SHA256" >> $env:GITHUB_STEP_SUMMARY
+          Get-Content "$env:RUNNER_TEMP/smoke.log" | Select-String '^RESULT:' | ForEach-Object { $_.Line >> $env:GITHUB_STEP_SUMMARY }
+
+      - name: Package portable build and evidence
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'ImageGlass-04dcbb6-win-x64'
+          Copy-Item 'app/source/__assets/__app/*' $output -Recurse -Force
           [IO.File]::WriteAllBytes((Join-Path $output '.igportable'), [byte[]]@())
           @{
-            _Metadata = @{ Description = 'Isolated ImageGlass test configuration'; Version = 10 }
+            _Metadata = @{ Description = 'ImageGlass test configuration'; Version = 10 }
             QuickSetupVersion = 10
             AutoUpdate = '0'
             EnableMultiInstances = $true
@@ -60,48 +112,42 @@ jobs:
             EnableLastSeenImage = $false
             EnableGalleryShellThumbnail = $false
           } | ConvertTo-Json | Set-Content (Join-Path $output 'igconfig.json') -Encoding utf8
-          Copy-Item "$env:RUNNER_TEMP/smoke-fixtures" (Join-Path $output '_test_samples') -Recurse -Force
-          $logs = New-Item -ItemType Directory -Path (Join-Path $output '_test_results') -Force
-          Copy-Item "$env:RUNNER_TEMP/build.log", "$env:RUNNER_TEMP/smoke.log" $logs.FullName
+          Copy-Item "$env:RUNNER_TEMP/inline-fixtures" (Join-Path $output '_test_samples') -Recurse -Force
+          $results = New-Item -ItemType Directory -Path (Join-Path $output '_test_results') -Force
+          Copy-Item "$env:RUNNER_TEMP/source.json", "$env:RUNNER_TEMP/build.log", "$env:RUNNER_TEMP/publish.log", "$env:RUNNER_TEMP/test-build.log", "$env:RUNNER_TEMP/smoke.log" $results.FullName
           @(
-            'Repository: CNDY1390/ImageGlass'
-            'Branch: ci/content-sniff-fallback'
-            "Built source SHA: $env:BUILD_SOURCE_SHA"
+            "Source commit: $env:SOURCE_SHA"
             "Actions run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-            'Base: eba2a40897b963ca1df7d2711353c5a9b4839bfb'
-            'This is a test build, not an official release. Upstream PR #2446 was not modified.'
-            ''
-            'Extract the whole archive to a writable folder, then run ImageGlass.exe from that folder.'
-            'The .igportable marker keeps settings, cache and logs separate from Scoop and AppData.'
-            'Use File > Open on _test_samples/png-content.tif and _test_samples/png-first-frame.ico.'
-            'Both must open; the ICO must keep four frames. Also test your original mismatched-extension image.'
-            'Optionally save the PNG-content .tif as a new PNG and reopen that new file.'
-            ''
-            'Implementation: preserve filename-first reads; retry eligible decode failures once on a fresh Unknown-format Stream reader.'
-            'Associated errors are checked recursively; ordinary warnings are allowed; cancellation wins before handoff and after either failure.'
-            'Two failures preserve the primary exception and attach the second under ImageGlass.ContentSniffFallbackException.'
-            'Limit: Magick.NET can hide underlying stream IO exceptions; an eligible native decode error cannot prove the absence of hidden IO faults.'
-            'Automated results are in _test_results/smoke.log. Windows GUI interaction, real RAW and other operating systems are not covered.'
+            'Extract the entire ZIP into a new writable folder and run ImageGlass.exe.'
+            'The .igportable marker isolates settings from Scoop and AppData.'
+            'Use File > Open to test png-content.tif, webp-content.jpg and png-first-frame.ico in _test_samples.'
+            'The ICO contains four sizes. Ctrl+Right switches frames; P opens frame navigation.'
+            'ico-content.tif and corrupt.tif are expected failures, not positive samples.'
+            'Automated tests use the same ImageGlass.Lib.dll included in this ZIP. See _test_results/smoke.log.'
+            'Windows GUI interaction, real RAW, PS/PDF and concurrent cancellation races have not been tested here.'
           ) | Set-Content (Join-Path $output 'TEST-BUILD.txt') -Encoding utf8
-          "Built and tested commit: ``$env:BUILD_SOURCE_SHA``" >> $env:GITHUB_STEP_SUMMARY
-          Get-Content "$env:RUNNER_TEMP/smoke.log" | Select-String '^RESULT:' | ForEach-Object { $_.Line >> $env:GITHUB_STEP_SUMMARY }
+          git -C app diff --exit-code HEAD -- source
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging modified production source' }
 
-      - name: Upload ready-to-run Windows test build
+      - name: Upload Windows build
         uses: actions/upload-artifact@v7
         with:
-          name: ImageGlass-content-sniff-fallback-win-x64
-          path: ${{ runner.temp }}/ImageGlass-content-sniff-fallback
+          name: ImageGlass-04dcbb6-win-x64
+          path: ${{ runner.temp }}/ImageGlass-04dcbb6-win-x64
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload validation logs even on failure
+      - name: Upload logs even on failure
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: content-sniff-validation-logs
+          name: validation-04dcbb6
           path: |
+            ${{ runner.temp }}/source.json
             ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/publish.log
+            ${{ runner.temp }}/test-build.log
             ${{ runner.temp }}/smoke.log
           if-no-files-found: warn
           retention-days: 14
