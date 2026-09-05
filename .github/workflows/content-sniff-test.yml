@@ -1,4 +1,4 @@
-name: Compare current base and PR merge on Magick 14.14
+name: Verify PR 2446 on release 10.0.6.906
 
 on:
   push:
@@ -8,8 +8,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr2446-base-merge-1414
+  group: pr2446-release-14171
   cancel-in-progress: false
+
+env:
+  SOURCE_SHA: a8754cbade55f803a536b7d335a68ad1161c203f
+  PATCH_SHA: 04dcbb640d42f483807a1904c0c9c1e699c4a2a2
+  EXPECTED_MAGICK: 14.17.1
 
 jobs:
   compare:
@@ -19,46 +24,67 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - kind: base
-            sha: cb390f5419993806f306ccc00feaf8daf392c491
-          - kind: merge
-            sha: f493e2c9f01d78df540c636d62b47f0a93ee4dec
-    name: ${{ matrix.kind }} - Magick.NET 14.14.0
+        kind: [base, patched]
+    name: ${{ matrix.kind }} - Magick.NET 14.17.1
     env:
       SOURCE_KIND: ${{ matrix.kind }}
-      SOURCE_SHA: ${{ matrix.sha }}
-      EXPECTED_MAGICK: 14.14.0
     steps:
       - name: Checkout external harness
         uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
           path: harness
-          sparse-checkout: .ci/BaseMergeSmoke
+          sparse-checkout: .ci
           persist-credentials: false
-      - name: Checkout pinned source without modification
+      - name: Checkout pinned latest upstream
         uses: actions/checkout@v6
         with:
           repository: d2phap/ImageGlass
-          ref: ${{ matrix.sha }}
+          ref: a8754cbade55f803a536b7d335a68ad1161c203f
           path: app
           persist-credentials: false
-      - name: Verify revision and dependency identity
+      - name: Checkout existing signed patch and its parent
+        uses: actions/checkout@v6
+        with:
+          repository: CNDY1390/ImageGlass
+          ref: 04dcbb640d42f483807a1904c0c9c1e699c4a2a2
+          fetch-depth: 2
+          path: original
+          persist-credentials: false
+      - name: Replay only the existing one-file patch and record source tree
         shell: pwsh
         run: |
-          $actual = (git -C app rev-parse HEAD).Trim()
-          if ($actual -ne $env:SOURCE_SHA) { throw "Unexpected revision: $actual" }
-          [xml]$packages = Get-Content 'app/source/Directory.Packages.props'
+          $ErrorActionPreference = 'Stop'
+          if ((git -C app rev-parse HEAD).Trim() -ne $env:SOURCE_SHA) { throw 'Wrong upstream checkout' }
+          if ((git -C original rev-parse HEAD).Trim() -ne $env:PATCH_SHA) { throw 'Wrong patch checkout' }
+          $patch = Join-Path $env:RUNNER_TEMP 'original.patch'
+          git -C original diff --binary --full-index "--output=$patch" 'HEAD^' HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Patch extraction failed' }
+          if ($env:SOURCE_KIND -eq 'patched') {
+            git -C app apply --check $patch
+            if ($LASTEXITCODE -ne 0) { throw 'Patch no longer applies' }
+            git -C app apply $patch
+            if ($LASTEXITCODE -ne 0) { throw 'Patch application failed' }
+            $files = @(git -C app diff --name-only)
+            if ($files.Count -ne 1 -or $files[0] -ne 'source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs') { throw 'Unexpected patch scope' }
+            git -C app diff --check
+            if ($LASTEXITCODE -ne 0) { throw 'Whitespace error' }
+            git -C app add -- source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs
+            if ($LASTEXITCODE -ne 0) { throw 'Staging failed' }
+            git -C app diff --cached --binary --full-index "--output=$env:RUNNER_TEMP/imageglass-current-upstream.patch" HEAD
+            if ($LASTEXITCODE -ne 0) { throw 'Rebased diff export failed' }
+          }
+          [xml]$packages = Get-Content app/source/Directory.Packages.props
           $versions = @($packages.Project.ItemGroup.PackageVersion | Where-Object { $_.Include -like 'Magick.NET-*' } | ForEach-Object { $_.Version } | Select-Object -Unique)
-          if ($versions.Count -ne 1 -or $versions[0] -ne $env:EXPECTED_MAGICK) { throw "Unexpected Magick versions: $versions" }
-          $commit = (git -C app cat-file -p HEAD) -join "`n"
-          if ($env:SOURCE_KIND -eq 'merge' -and ($commit -notmatch 'parent cb390f5419993806f306ccc00feaf8daf392c491' -or $commit -notmatch 'parent 04dcbb640d42f483807a1904c0c9c1e699c4a2a2')) { throw 'Unexpected merge parents' }
+          if ($versions.Count -ne 1 -or $versions[0] -ne $env:EXPECTED_MAGICK) { throw 'Unexpected dependency version' }
+          $tree = (git -C app write-tree).Trim()
+          "TESTED_TREE=$tree" >> $env:GITHUB_ENV
           @{
-            source_sha = $actual
-            source_kind = $env:SOURCE_KIND
-            source_tree = (git -C app rev-parse 'HEAD^{tree}').Trim()
-            magick_package = $versions[0]
+            base_sha = $env:SOURCE_SHA
+            patch_sha = $env:PATCH_SHA
+            kind = $env:SOURCE_KIND
+            tree = $tree
+            magick = $versions[0]
             workflow_sha = $env:GITHUB_SHA
             run_url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/source.json" -Encoding utf8
@@ -70,7 +96,6 @@ jobs:
       - name: Build Windows application
         shell: pwsh
         run: |
-          dotnet --info
           dotnet build app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 2>&1 | Tee-Object "$env:RUNNER_TEMP/build.log"
           if ($LASTEXITCODE -ne 0) { throw "Build failed: $LASTEXITCODE" }
       - name: Publish source under test
@@ -78,32 +103,35 @@ jobs:
         run: |
           dotnet publish app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 -p:PublishAot=false -p:PublishReadyToRun=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:SelfContained=true -o "$env:RUNNER_TEMP/ImageGlass" 2>&1 | Tee-Object "$env:RUNNER_TEMP/publish.log"
           if ($LASTEXITCODE -ne 0) { throw "Publish failed: $LASTEXITCODE" }
-      - name: Build independent observation runner
+      - name: Build runner with exact user-tested samples 01 and 04
         shell: pwsh
         run: |
+          ./harness/.ci/OfficialCases/add-cases.ps1
           $project = Join-Path $env:GITHUB_WORKSPACE 'app/source/ImageGlass.Lib/ImageGlass.Lib.csproj'
           dotnet build harness/.ci/BaseMergeSmoke/BaseMergeSmoke.csproj -c Debug -p:Platform=x64 -p:PublishAot=false "-p:ImageGlassProject=$project" -o "$env:RUNNER_TEMP/runner" 2>&1 | Tee-Object "$env:RUNNER_TEMP/test-build.log"
           if ($LASTEXITCODE -ne 0) { throw "Runner build failed: $LASTEXITCODE" }
           Copy-Item "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" "$env:RUNNER_TEMP/runner" -Force
           Copy-Item "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.pdb" "$env:RUNNER_TEMP/runner" -Force -ErrorAction SilentlyContinue
-      - name: Observe identical samples and check actual loaded version
+      - name: Compare pixels and behavior on actual Magick.NET 14.17.1
         shell: pwsh
         run: |
+          $env:OFFICIAL_CASES = Join-Path $env:GITHUB_WORKSPACE 'harness/.ci/OfficialCases/cases.json'
           $env:EXPECTED_LIB_SHA256 = (Get-FileHash "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" -Algorithm SHA256).Hash
           dotnet "$env:RUNNER_TEMP/runner/BaseMergeSmoke.dll" "$env:RUNNER_TEMP/fixtures" "$env:RUNNER_TEMP/observations.json" 2>&1 | Tee-Object "$env:RUNNER_TEMP/observations.log"
-          if ($LASTEXITCODE -ne 0) { throw "Observation checks failed: $LASTEXITCODE" }
-          git -C app diff --exit-code HEAD -- source
-          if ($LASTEXITCODE -ne 0) { throw 'Production source changed' }
-          "Source: $env:SOURCE_KIND $env:SOURCE_SHA; loaded Magick.NET must be $env:EXPECTED_MAGICK" >> $env:GITHUB_STEP_SUMMARY
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed: $LASTEXITCODE" }
+          git -C app diff --exit-code -- source
+          if ($LASTEXITCODE -ne 0) { throw 'Source changed after staging' }
+          if ((git -C app write-tree).Trim() -ne $env:TESTED_TREE) { throw 'Source tree changed' }
+          "Base: $env:SOURCE_SHA; patch: $env:PATCH_SHA; kind: $env:SOURCE_KIND; tested tree: $env:TESTED_TREE" >> $env:GITHUB_STEP_SUMMARY
           Get-Content "$env:RUNNER_TEMP/observations.log" | Select-String '^(OBS:|RESULT:|MAGICK:)' | ForEach-Object { $_.Line >> $env:GITHUB_STEP_SUMMARY }
-      - name: Package isolated portable application
+      - name: Package portable build, exact diff and evidence
         shell: pwsh
         run: |
           $output = Join-Path $env:RUNNER_TEMP 'ImageGlass'
           Copy-Item 'app/source/__assets/__app/*' $output -Recurse -Force
           [IO.File]::WriteAllBytes((Join-Path $output '.igportable'), [byte[]]@())
           @{
-            _Metadata = @{ Description = 'Isolated PR comparison configuration'; Version = 10 }
+            _Metadata = @{ Description = 'Isolated PR 2446 validation'; Version = 10 }
             QuickSetupVersion = 10
             AutoUpdate = '0'
             EnableMultiInstances = $true
@@ -114,20 +142,21 @@ jobs:
           Copy-Item "$env:RUNNER_TEMP/fixtures" (Join-Path $output '_test_samples') -Recurse -Force
           $results = New-Item -ItemType Directory -Path (Join-Path $output '_test_results') -Force
           Copy-Item "$env:RUNNER_TEMP/source.json", "$env:RUNNER_TEMP/observations.json", "$env:RUNNER_TEMP/observations.log" $results.FullName
-          @("Source: $env:SOURCE_KIND $env:SOURCE_SHA", 'Magick.NET: 14.14.0', "Run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID", 'This is an isolated comparison build, not an official release.', 'Extract the whole ZIP to a new writable folder and run ImageGlass.exe.', 'Metadata-probe observations are recorded, not assumed to fail.', 'GUI, real RAW, PS/PDF and concurrent cancellation have not been tested.') | Set-Content (Join-Path $output 'TEST-BUILD.txt') -Encoding utf8
-      - name: Upload portable comparison build
+          if ($env:SOURCE_KIND -eq 'patched') { Copy-Item "$env:RUNNER_TEMP/imageglass-current-upstream.patch" $results.FullName }
+          @("Base: $env:SOURCE_SHA", "Patch: $env:PATCH_SHA", "Kind: $env:SOURCE_KIND", "Tree: $env:TESTED_TREE", 'Magick.NET: 14.17.1', "Run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID", 'Test build, not an official release.', 'Extract to a new writable folder and run ImageGlass.exe; configuration is portable and isolated.', 'Use _test_samples/01-png-as-tif.tif and 04-two-frame-gif-as-tif.tif. Ctrl+Right switches GIF/ICO frames.', 'GUI, real RAW, PS/PDF and concurrent cancellation are not covered by this run.') | Set-Content (Join-Path $output 'TEST-BUILD.txt') -Encoding utf8
+      - name: Upload portable build
         uses: actions/upload-artifact@v7
         with:
-          name: ImageGlass-${{ matrix.kind }}-14.14.0-win-x64
+          name: ImageGlass-${{ matrix.kind }}-14.17.1-win-x64
           path: ${{ runner.temp }}/ImageGlass
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
-      - name: Upload evidence even on failure
+      - name: Upload evidence and rebased diff
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: validation-${{ matrix.kind }}-14.14.0
+          name: validation-${{ matrix.kind }}-14.17.1
           path: |
             ${{ runner.temp }}/source.json
             ${{ runner.temp }}/observations.json
@@ -135,5 +164,6 @@ jobs:
             ${{ runner.temp }}/build.log
             ${{ runner.temp }}/publish.log
             ${{ runner.temp }}/test-build.log
+            ${{ runner.temp }}/imageglass-current-upstream.patch
           if-no-files-found: warn
           retention-days: 14
