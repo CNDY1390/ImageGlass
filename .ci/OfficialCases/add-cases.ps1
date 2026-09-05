@@ -1,6 +1,10 @@
 $ErrorActionPreference = 'Stop'
 $path = Join-Path $PSScriptRoot '../BaseMergeSmoke/Program.cs'
 $text = [IO.File]::ReadAllText($path)
+$versionAnchor = 'var magickVersion = magick.GetName().Version!.ToString(3);'
+if ([regex]::Matches($text, [regex]::Escape($versionAnchor)).Count -ne 1) { throw 'Unexpected version check' }
+# 14.17.1 reports AssemblyVersion 14.17.0.0; the library banner reports its package version.
+$text = $text.Replace($versionAnchor, "var magickVersion = MagickNET.Version.Split(' ', StringSplitOptions.RemoveEmptyEntries)[^1];")
 $prepareAnchor = '        var hashes = Directory.GetFiles(root)'
 $prepare = @'
         using var officialCases = JsonDocument.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("OFFICIAL_CASES")!));
