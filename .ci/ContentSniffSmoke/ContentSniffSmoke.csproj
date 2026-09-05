@@ -9,6 +9,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../source/ImageGlass.Lib/ImageGlass.Lib.csproj" />
-    <None Include="fixtures.zip.b64" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="fixtures.zip.b64" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
