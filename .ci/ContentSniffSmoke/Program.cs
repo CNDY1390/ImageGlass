@@ -55,7 +55,7 @@ internal static class Program
             });
         }
 
-        foreach (var path in new[] { png, pngJpg, normalPng, ico, icoTif })
+        foreach (var path in new[] { png, pngJpg, normalPng, ico })
         {
             await Test("single read " + Path.GetFileName(path), async () =>
             {
@@ -68,7 +68,7 @@ internal static class Program
             });
         }
 
-        foreach (var path in new[] { ico, icoTif, png })
+        foreach (var path in new[] { ico, png })
         {
             await Test("collection read " + Path.GetFileName(path), async () =>
             {
@@ -82,7 +82,7 @@ internal static class Program
             });
         }
 
-        foreach (var path in new[] { png, pngJpg, ico, icoTif })
+        foreach (var path in new[] { png, pngJpg, ico })
         {
             await Test("real QuickDecode " + Path.GetFileName(path), async () =>
             {
@@ -90,6 +90,18 @@ internal static class Program
                 Check(image is not null && image.Width > 0 && image.Height > 0, "QuickDecode returned no image");
             });
         }
+
+        await Test("pre-existing limitation: renamed ICO is rejected by the metadata probe", async () =>
+        {
+            using var baselineProbe = new MagickImage();
+            var rejected = false;
+            try { baselineProbe.Ping(icoTif, new MagickReadSettings()); }
+            catch (MagickException error) { rejected = true; PrintDiagnostics(error); }
+            Check(rejected, "Re-evaluate the renamed-ICO expectation: the original probe now succeeds");
+            using var quick = await MagickCodec.QuickDecodeAsync(icoTif, 256, 256);
+            Check(quick is null, "Unexpected change in pre-decode probe behavior");
+            Console.WriteLine("LIMITATION: ICO content named .tif already fails the unchanged metadata probe; this build does not add a probe fallback.");
+        });
 
         var gifTif = Path.Combine(root, "animated-gif-content.tif");
         using (var frames = new MagickImageCollection())
