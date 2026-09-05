@@ -1,0 +1,107 @@
+name: Build content-sniff fallback test
+
+on:
+  push:
+    branches:
+      - ci/content-sniff-fallback
+
+permissions:
+  contents: write
+
+concurrency:
+  group: content-sniff-fallback-test
+  cancel-in-progress: false
+
+jobs:
+  windows-x64:
+    if: github.repository == 'CNDY1390/ImageGlass'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout authorized test branch
+        uses: actions/checkout@v6
+
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Apply and commit exact source wiring on the test branch
+        shell: pwsh
+        run: ./.ci/prepare-content-fallback.ps1
+
+      - name: Build Windows application
+        shell: pwsh
+        run: |
+          dotnet --info
+          dotnet build source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 2>&1 | Tee-Object "$env:RUNNER_TEMP/build.log"
+          if ($LASTEXITCODE -ne 0) { throw "Windows build failed: $LASTEXITCODE" }
+
+      - name: Run actual-library and failure-injection smoke tests
+        shell: pwsh
+        run: |
+          dotnet run --project .ci/ContentSniffSmoke/ContentSniffSmoke.csproj -c Debug -p:Platform=x64 -- "$env:RUNNER_TEMP/smoke-fixtures" 2>&1 | Tee-Object "$env:RUNNER_TEMP/smoke.log"
+          if ($LASTEXITCODE -ne 0) { throw "Smoke tests failed: $LASTEXITCODE" }
+
+      - name: Publish isolated portable test build
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'ImageGlass-content-sniff-fallback'
+          dotnet publish source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 -p:PublishAot=false -p:PublishReadyToRun=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:SelfContained=true -o $output
+          if ($LASTEXITCODE -ne 0) { throw "Publish failed: $LASTEXITCODE" }
+          Copy-Item 'source/__assets/__app/*' $output -Recurse -Force
+          [IO.File]::WriteAllBytes((Join-Path $output '.igportable'), [byte[]]@())
+          @{
+            _Metadata = @{ Description = 'Isolated ImageGlass test configuration'; Version = 10 }
+            QuickSetupVersion = 10
+            AutoUpdate = '0'
+            EnableMultiInstances = $true
+            EnableWelcomeImage = $false
+            EnableLastSeenImage = $false
+            EnableGalleryShellThumbnail = $false
+          } | ConvertTo-Json | Set-Content (Join-Path $output 'igconfig.json') -Encoding utf8
+          Copy-Item "$env:RUNNER_TEMP/smoke-fixtures" (Join-Path $output '_test_samples') -Recurse -Force
+          $logs = New-Item -ItemType Directory -Path (Join-Path $output '_test_results') -Force
+          Copy-Item "$env:RUNNER_TEMP/build.log", "$env:RUNNER_TEMP/smoke.log" $logs.FullName
+          @(
+            'Repository: CNDY1390/ImageGlass'
+            'Branch: ci/content-sniff-fallback'
+            "Built source SHA: $env:BUILD_SOURCE_SHA"
+            "Actions run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            'Base: eba2a40897b963ca1df7d2711353c5a9b4839bfb'
+            'This is a test build, not an official release. Upstream PR #2446 was not modified.'
+            ''
+            'Extract the whole archive to a writable folder, then run ImageGlass.exe from that folder.'
+            'The .igportable marker keeps settings, cache and logs separate from Scoop and AppData.'
+            'Use File > Open on _test_samples/png-content.tif and _test_samples/png-first-frame.ico.'
+            'Both must open; the ICO must keep four frames. Also test your original mismatched-extension image.'
+            'Optionally save the PNG-content .tif as a new PNG and reopen that new file.'
+            ''
+            'Implementation: preserve filename-first reads; retry eligible decode failures once on a fresh Unknown-format Stream reader.'
+            'Associated errors are checked recursively; ordinary warnings are allowed; cancellation wins before handoff and after either failure.'
+            'Two failures preserve the primary exception and attach the second under ImageGlass.ContentSniffFallbackException.'
+            'Limit: Magick.NET can hide underlying stream IO exceptions; an eligible native decode error cannot prove the absence of hidden IO faults.'
+            'Automated results are in _test_results/smoke.log. Windows GUI interaction, real RAW and other operating systems are not covered.'
+          ) | Set-Content (Join-Path $output 'TEST-BUILD.txt') -Encoding utf8
+          "Built and tested commit: ``$env:BUILD_SOURCE_SHA``" >> $env:GITHUB_STEP_SUMMARY
+          Get-Content "$env:RUNNER_TEMP/smoke.log" | Select-String '^RESULT:' | ForEach-Object { $_.Line >> $env:GITHUB_STEP_SUMMARY }
+
+      - name: Upload ready-to-run Windows test build
+        uses: actions/upload-artifact@v7
+        with:
+          name: ImageGlass-content-sniff-fallback-win-x64
+          path: ${{ runner.temp }}/ImageGlass-content-sniff-fallback
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload validation logs even on failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: content-sniff-validation-logs
+          path: |
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/smoke.log
+          if-no-files-found: warn
+          retention-days: 14
