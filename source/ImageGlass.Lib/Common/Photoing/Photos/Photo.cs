@@ -48,6 +48,10 @@ public partial class Photo : PhDisposable
     private readonly Lock _lock = new();
     private int _loadGeneration;
 
+    // serializes LoadAsync on this photo: a second loader joins the load in flight, never cancels it
+    private readonly SemaphoreSlim _loadGate = new(1, 1);
+    private int _cancelEpoch;
+
     // track pending tasks
     private ConcurrentDictionary<Guid, bool> _taskRefs = new();
 
@@ -650,6 +654,19 @@ public partial class Photo : PhDisposable
     [MemberNotNull(nameof(_cancelPhotoLoading))]
     public virtual CancellationToken CancelLoading()
     {
+        // a cancel must also drop a load still queued behind another one, which holds no token yet
+        _ = Interlocked.Increment(ref _cancelEpoch);
+
+        return ResetCancelToken();
+    }
+
+
+    /// <summary>
+    /// Replaces the loading token without counting as a cancel of a queued load.
+    /// </summary>
+    [MemberNotNull(nameof(_cancelPhotoLoading))]
+    private CancellationToken ResetCancelToken()
+    {
         lock (_lock)
         {
             _cancelPhotoLoading?.Cancel();
@@ -664,6 +681,9 @@ public partial class Photo : PhDisposable
     /// <summary>
     /// Loads photo from file.
     /// </summary>
+    /// <remarks>
+    /// Serialized per photo: cancelling a load in flight instead left its caller with no Loaded event.
+    /// </remarks>
     public virtual async Task LoadAsync(bool useCache,
         Func<PhotoLoadingEventArgs, Task>? handleProgressFn = null,
         bool skipLoadingEvent = false)
@@ -672,9 +692,59 @@ public partial class Photo : PhDisposable
         if (useCache && State != PhotoState.None)
         {
             PhotoTrace.Mark("load:cache-hit", FilePath, $"state={State}");
+            await DispatchLoadedAsync(handleProgressFn);
             return;
         }
-        var token = CancelLoading();
+
+        // no ConfigureAwait(false) below: handleProgressFn renders, so it resumes on the UI thread
+        var epoch = Volatile.Read(ref _cancelEpoch);
+        await _loadGate.WaitAsync();
+        try
+        {
+            // cancelled while queued, i.e. the caller navigated away before we got our turn
+            if (Volatile.Read(ref _cancelEpoch) != epoch)
+            {
+                PhotoTrace.Mark("load:queued-cancel", FilePath, $"state={State}");
+                return;
+            }
+
+            // the load we queued behind may have decoded the photo already
+            if (useCache && State != PhotoState.None)
+            {
+                PhotoTrace.Mark("load:cache-hit", FilePath, $"state={State}, afterGate=True");
+                await DispatchLoadedAsync(handleProgressFn);
+                return;
+            }
+
+            await LoadAsync__(useCache, handleProgressFn, skipLoadingEvent);
+        }
+        finally
+        {
+            _ = _loadGate.Release();
+        }
+    }
+
+
+    /// <summary>
+    /// Raises Loaded for an already-decoded photo, so a cache hit still tells its caller to render.
+    /// </summary>
+    private async Task DispatchLoadedAsync(Func<PhotoLoadingEventArgs, Task>? handleProgressFn)
+    {
+        if (handleProgressFn is null || State != PhotoState.Loaded) return;
+
+        // CancellationToken.None: the decode is done, there is nothing left to abort
+        await handleProgressFn(new(PhotoState.Loaded, this, CancellationToken.None));
+    }
+
+
+    /// <summary>
+    /// The load itself; runs one at a time per photo.
+    /// </summary>
+    private async Task LoadAsync__(bool useCache,
+        Func<PhotoLoadingEventArgs, Task>? handleProgressFn,
+        bool skipLoadingEvent)
+    {
+        var token = ResetCancelToken();
         var myGeneration = Interlocked.Increment(ref _loadGeneration);
 
         PhotoTrace.Begin(FilePath, $"useCache={useCache}, skipLoadingEvent={skipLoadingEvent}");

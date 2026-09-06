@@ -802,9 +802,10 @@ public partial class ToolbarControl : PhControl
             = PART_MnuViewLastFrame.IsEnabled
             = hasMultiFrames;
 
-        // Pro licensing: show exactly one item for the current license state
-        PART_MnuUpgradeLicense.IsVisible = !Core.IsProEnabled;
-        PART_MnuManageLicense.IsVisible = Core.IsProEnabled;
+        // Pro licensing: one item per state; an expired license is managed, not pitched
+        var isManagingLicense = Core.IsProEnabled || Core.ExpiredLicense is not null;
+        PART_MnuUpgradeLicense.IsVisible = !isManagingLicense;
+        PART_MnuManageLicense.IsVisible = isManagingLicense;
     }
 
 

@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 using Avalonia.Controls;
 using ImageGlass.Common.Localization;
+using ImageGlass.Common.ServiceProviders;
 using ImageGlass.Common.ServiceProviders.Update;
 using ImageGlass.UI.Windowing;
 using ImageGlass.Windows;
@@ -76,6 +77,11 @@ public partial class GeneralSettingsView : SettingsPageView
             LangId.Settings_AutoUpdate, LangId.Settings_AppUpdate);
         BindLink(PART_SeeWhatIsSent, LangId.Settings_SeeWhatIsSent, ShowUsageStatsPreview);
 
+        SetLocalizedText(PART_CheckForUpdate, LangId._CheckForUpdate);
+        PART_CheckForUpdate.Click += (_, _) => CheckForUpdate();
+        PART_CheckForUpdate.IsVisible = !FeatureManager.IsLocked(API.IG_CheckForUpdate);
+        RegisterSearchKey(PART_CheckForUpdate, LangId._CheckForUpdate, null, LangId.Settings_AppUpdate);
+
         // Others
         BindIntInput(PART_MsgDuration, ConfigId.InAppMessageDuration,
             LangId.Settings_InAppMessageDuration, LangId.Settings_Others);
@@ -93,6 +99,19 @@ public partial class GeneralSettingsView : SettingsPageView
             VM.SetValue(id, (chk.IsChecked ?? false) ? DateTime.UtcNow.ToString() : "0");
 
         RegisterSearchKey(chk, label, id, section);
+    }
+
+
+    /// <summary>
+    /// Runs a manual update check: opens the update window in its checking state.
+    /// </summary>
+    private static async void CheckForUpdate()
+    {
+        try
+        {
+            _ = await Core.API.RunApiAsync(API.IG_CheckForUpdate, "true");
+        }
+        catch {}
     }
 
 

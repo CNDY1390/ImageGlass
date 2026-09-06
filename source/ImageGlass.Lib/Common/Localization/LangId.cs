@@ -395,6 +395,9 @@ public enum LangId
     Menu_MnuUpgradeLicense_BuyOnline,
     Menu_MnuUpgradeLicense_ViewFeatures,
     Menu_MnuUpgradeLicense_OutOfScope,
+    Menu_MnuUpgradeLicense_Expired,
+    Menu_MnuUpgradeLicense_ExpiredTitle,
+    Menu_MnuUpgradeLicense_SwitchToClassic,
 
     Menu_MnuManageLicense,
     Menu_MnuManageLicense_ChangeLicense,
@@ -425,6 +428,7 @@ public enum LangId
     Menu_MnuCheckForUpdate_CurrentVersion,
     Menu_MnuCheckForUpdate_LatestVersion,
     Menu_MnuCheckForUpdate_PublishedDate,
+    Menu_MnuCheckForUpdate_ProFromStore,
 
     Menu_MnuSetDefaultPhotoViewer,
     Menu_MnuSetDefaultPhotoViewer_Success,
