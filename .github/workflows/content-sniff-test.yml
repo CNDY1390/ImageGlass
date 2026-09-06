@@ -1,90 +1,64 @@
-name: Verify PR 2446 on release 10.0.6.906
+name: Build PR 2446 final head bba9fca
 
 on:
   push:
     branches: [ci/content-sniff-fallback]
+    paths: [.github/workflows/content-sniff-test.yml]
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr2446-release-14171
+  group: pr2446-final-head-bba9fca
   cancel-in-progress: false
 
 env:
-  SOURCE_SHA: a8754cbade55f803a536b7d335a68ad1161c203f
-  PATCH_SHA: 04dcbb640d42f483807a1904c0c9c1e699c4a2a2
+  SOURCE_SHA: bba9fca1061e865742d601f6715656ccf28677af
+  EXPECTED_TREE: bd3894e470640d6370845fa359a5c1a092ea7900
   EXPECTED_MAGICK: 14.17.1
+  SOURCE_KIND: pr-head
 
 jobs:
-  compare:
+  build:
     if: github.repository == 'CNDY1390/ImageGlass'
     runs-on: windows-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        kind: [base, patched]
-    name: ${{ matrix.kind }} - Magick.NET 14.17.1
-    env:
-      SOURCE_KIND: ${{ matrix.kind }}
+    name: PR head bba9fca - Windows x64
     steps:
-      - name: Checkout external harness
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.sha }}
-          path: harness
-          sparse-checkout: .ci
-          persist-credentials: false
-      - name: Checkout pinned latest upstream
-        uses: actions/checkout@v6
-        with:
-          repository: d2phap/ImageGlass
-          ref: a8754cbade55f803a536b7d335a68ad1161c203f
-          path: app
-          persist-credentials: false
-      - name: Checkout existing signed patch and its parent
+      - name: Checkout exact final PR commit
         uses: actions/checkout@v6
         with:
           repository: CNDY1390/ImageGlass
-          ref: 04dcbb640d42f483807a1904c0c9c1e699c4a2a2
-          fetch-depth: 2
-          path: original
+          ref: bba9fca1061e865742d601f6715656ccf28677af
+          path: app
           persist-credentials: false
-      - name: Replay only the existing one-file patch and record source tree
+      - name: Checkout pinned external test harness
+        uses: actions/checkout@v6
+        with:
+          repository: CNDY1390/ImageGlass
+          ref: 375013666adbb79cbd4bdaece282608733a149fc
+          path: harness
+          sparse-checkout: .ci
+          persist-credentials: false
+      - name: Verify exact checkout and dependency
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          if ((git -C app rev-parse HEAD).Trim() -ne $env:SOURCE_SHA) { throw 'Wrong upstream checkout' }
-          if ((git -C original rev-parse HEAD).Trim() -ne $env:PATCH_SHA) { throw 'Wrong patch checkout' }
-          $patch = Join-Path $env:RUNNER_TEMP 'original.patch'
-          git -C original diff --binary --full-index "--output=$patch" 'HEAD^' HEAD
-          if ($LASTEXITCODE -ne 0) { throw 'Patch extraction failed' }
-          if ($env:SOURCE_KIND -eq 'patched') {
-            git -C app apply --check $patch
-            if ($LASTEXITCODE -ne 0) { throw 'Patch no longer applies' }
-            git -C app apply $patch
-            if ($LASTEXITCODE -ne 0) { throw 'Patch application failed' }
-            $files = @(git -C app diff --name-only)
-            if ($files.Count -ne 1 -or $files[0] -ne 'source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs') { throw 'Unexpected patch scope' }
-            git -C app diff --check
-            if ($LASTEXITCODE -ne 0) { throw 'Whitespace error' }
-            git -C app add -- source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs
-            if ($LASTEXITCODE -ne 0) { throw 'Staging failed' }
-            git -C app diff --cached --binary --full-index "--output=$env:RUNNER_TEMP/imageglass-current-upstream.patch" HEAD
-            if ($LASTEXITCODE -ne 0) { throw 'Rebased diff export failed' }
-          }
+          $actual = (git -C app rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $env:SOURCE_SHA) { throw 'Wrong source commit' }
+          $tree = (git -C app rev-parse 'HEAD^{tree}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $tree -ne $env:EXPECTED_TREE) { throw 'Wrong source tree' }
+          git -C app diff --exit-code HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Checkout is not clean' }
           [xml]$packages = Get-Content app/source/Directory.Packages.props
           $versions = @($packages.Project.ItemGroup.PackageVersion | Where-Object { $_.Include -like 'Magick.NET-*' } | ForEach-Object { $_.Version } | Select-Object -Unique)
-          if ($versions.Count -ne 1 -or $versions[0] -ne $env:EXPECTED_MAGICK) { throw 'Unexpected dependency version' }
-          $tree = (git -C app write-tree).Trim()
-          "TESTED_TREE=$tree" >> $env:GITHUB_ENV
+          if ($versions.Count -ne 1 -or $versions[0] -ne $env:EXPECTED_MAGICK) { throw 'Wrong dependency version' }
           @{
-            base_sha = $env:SOURCE_SHA
-            patch_sha = $env:PATCH_SHA
-            kind = $env:SOURCE_KIND
-            tree = $tree
-            magick = $versions[0]
+            source_sha = $actual
+            source_tree = $tree
+            direct_checkout = $true
+            source_repository = 'CNDY1390/ImageGlass'
+            harness_sha = '375013666adbb79cbd4bdaece282608733a149fc'
+            magick_package = $versions[0]
             workflow_sha = $env:GITHUB_SHA
             run_url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/source.json" -Encoding utf8
@@ -98,12 +72,12 @@ jobs:
         run: |
           dotnet build app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 2>&1 | Tee-Object "$env:RUNNER_TEMP/build.log"
           if ($LASTEXITCODE -ne 0) { throw "Build failed: $LASTEXITCODE" }
-      - name: Publish source under test
+      - name: Publish exact PR commit
         shell: pwsh
         run: |
           dotnet publish app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 -p:PublishAot=false -p:PublishReadyToRun=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:SelfContained=true -o "$env:RUNNER_TEMP/ImageGlass" 2>&1 | Tee-Object "$env:RUNNER_TEMP/publish.log"
           if ($LASTEXITCODE -ne 0) { throw "Publish failed: $LASTEXITCODE" }
-      - name: Build runner with exact user-tested samples 01 and 04
+      - name: Build independent regression runner
         shell: pwsh
         run: |
           ./harness/.ci/OfficialCases/add-cases.ps1
@@ -112,51 +86,81 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Runner build failed: $LASTEXITCODE" }
           Copy-Item "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" "$env:RUNNER_TEMP/runner" -Force
           Copy-Item "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.pdb" "$env:RUNNER_TEMP/runner" -Force -ErrorAction SilentlyContinue
-      - name: Compare pixels and behavior on actual Magick.NET 14.17.1
+      - name: Test the published library
         shell: pwsh
         run: |
           $env:OFFICIAL_CASES = Join-Path $env:GITHUB_WORKSPACE 'harness/.ci/OfficialCases/cases.json'
           $env:EXPECTED_LIB_SHA256 = (Get-FileHash "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" -Algorithm SHA256).Hash
           dotnet "$env:RUNNER_TEMP/runner/BaseMergeSmoke.dll" "$env:RUNNER_TEMP/fixtures" "$env:RUNNER_TEMP/observations.json" 2>&1 | Tee-Object "$env:RUNNER_TEMP/observations.log"
           if ($LASTEXITCODE -ne 0) { throw "Tests failed: $LASTEXITCODE" }
-          git -C app diff --exit-code -- source
-          if ($LASTEXITCODE -ne 0) { throw 'Source changed after staging' }
-          if ((git -C app write-tree).Trim() -ne $env:TESTED_TREE) { throw 'Source tree changed' }
-          "Base: $env:SOURCE_SHA; patch: $env:PATCH_SHA; kind: $env:SOURCE_KIND; tested tree: $env:TESTED_TREE" >> $env:GITHUB_STEP_SUMMARY
-          Get-Content "$env:RUNNER_TEMP/observations.log" | Select-String '^(OBS:|RESULT:|MAGICK:)' | ForEach-Object { $_.Line >> $env:GITHUB_STEP_SUMMARY }
-      - name: Package portable build, exact diff and evidence
+          git -C app diff --exit-code HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Tracked source changed during build or test' }
+          if ((git -C app rev-parse HEAD).Trim() -ne $env:SOURCE_SHA) { throw 'Source commit changed' }
+          "Direct checkout of PR #2446 head: $env:SOURCE_SHA; tree: $env:EXPECTED_TREE; Magick.NET: $env:EXPECTED_MAGICK" >> $env:GITHUB_STEP_SUMMARY
+          Get-Content "$env:RUNNER_TEMP/observations.log" | Select-String '^(OBS:|RESULT:|MAGICK:|NATIVE:)' | ForEach-Object { $_.Line >> $env:GITHUB_STEP_SUMMARY }
+      - name: Package portable application and manual test files
         shell: pwsh
         run: |
           $output = Join-Path $env:RUNNER_TEMP 'ImageGlass'
+          $samples = Join-Path $env:RUNNER_TEMP 'manual-tests'
+          New-Item -ItemType Directory -Path "$samples/reference" -Force | Out-Null
+          Copy-Item "$env:RUNNER_TEMP/fixtures/01-png-as-tif.tif" $samples
+          Copy-Item "$env:RUNNER_TEMP/fixtures/04-two-frame-gif-as-tif.tif" $samples
+          Copy-Item "$env:RUNNER_TEMP/fixtures/png-first-frame.ico" "$samples/05-valid-png-compressed.ico"
+          Copy-Item "$env:RUNNER_TEMP/fixtures/corrupt.tif" "$samples/06-corrupt.tif"
+          Copy-Item "$env:RUNNER_TEMP/fixtures/01-reference.png" "$samples/reference/01-png.png"
+          Copy-Item "$env:RUNNER_TEMP/fixtures/04-reference.gif" "$samples/reference/04-two-frame.gif"
+          @(
+            'PR #2446 final head bba9fca: manual Windows tests.',
+            'Close all ImageGlass windows. Extract the application into a new folder. Start its ImageGlass.exe, then use Ctrl+O.',
+            '01-png-as-tif.tif: should display at 320x180. Save As to a new PNG, then reopen the saved PNG.',
+            '04-two-frame-gif-as-tif.tif: should show two 8x8 frames (red then blue); Ctrl+Right switches frames. Autoplay is not required.',
+            '05-valid-png-compressed.ico: should show all four frames; Ctrl+Right switches frames.',
+            '06-corrupt.tif: deliberately invalid input; an error is expected. The application should remain usable.',
+            'Check the gallery thumbnail for 01. reference/ contains byte-identical correctly named controls.',
+            'Do not rename the test inputs or overwrite them during Save As.',
+            'This run does not perform GUI interaction, real RAW tests or in-flight cancellation tests.'
+          ) | Set-Content "$samples/README.txt" -Encoding utf8
+          Get-ChildItem $samples -Recurse -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | Sort-Object FullName | ForEach-Object {
+            $relative = [IO.Path]::GetRelativePath($samples, $_.FullName).Replace('\', '/')
+            "$( (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() )  $relative"
+          } | Set-Content "$samples/SHA256SUMS.txt" -Encoding utf8
           Copy-Item 'app/source/__assets/__app/*' $output -Recurse -Force
           [IO.File]::WriteAllBytes((Join-Path $output '.igportable'), [byte[]]@())
           @{
-            _Metadata = @{ Description = 'Isolated PR 2446 validation'; Version = 10 }
+            _Metadata = @{ Description = 'Isolated PR 2446 final-head test'; Version = 10 }
             QuickSetupVersion = 10
             AutoUpdate = '0'
             EnableMultiInstances = $true
             EnableWelcomeImage = $false
             EnableLastSeenImage = $false
+            ShowGallery = $true
             EnableGalleryShellThumbnail = $false
           } | ConvertTo-Json | Set-Content (Join-Path $output 'igconfig.json') -Encoding utf8
-          Copy-Item "$env:RUNNER_TEMP/fixtures" (Join-Path $output '_test_samples') -Recurse -Force
+          Copy-Item $samples (Join-Path $output '_test_samples') -Recurse -Force
           $results = New-Item -ItemType Directory -Path (Join-Path $output '_test_results') -Force
           Copy-Item "$env:RUNNER_TEMP/source.json", "$env:RUNNER_TEMP/observations.json", "$env:RUNNER_TEMP/observations.log" $results.FullName
-          if ($env:SOURCE_KIND -eq 'patched') { Copy-Item "$env:RUNNER_TEMP/imageglass-current-upstream.patch" $results.FullName }
-          @("Base: $env:SOURCE_SHA", "Patch: $env:PATCH_SHA", "Kind: $env:SOURCE_KIND", "Tree: $env:TESTED_TREE", 'Magick.NET: 14.17.1', "Run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID", 'Test build, not an official release.', 'Extract to a new writable folder and run ImageGlass.exe; configuration is portable and isolated.', 'Use _test_samples/01-png-as-tif.tif and 04-two-frame-gif-as-tif.tif. Ctrl+Right switches GIF/ICO frames.', 'GUI, real RAW, PS/PDF and concurrent cancellation are not covered by this run.') | Set-Content (Join-Path $output 'TEST-BUILD.txt') -Encoding utf8
-      - name: Upload portable build
+          @("Source commit: $env:SOURCE_SHA", "Source tree: $env:EXPECTED_TREE", "Magick.NET: $env:EXPECTED_MAGICK", "Run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID", 'Direct checkout. No patch replay or production-source changes.', 'Self-contained portable test build. Extract to a new writable folder and run ImageGlass.exe.', 'See _test_samples/README.txt for manual tests.') | Set-Content (Join-Path $output 'TEST-BUILD.txt') -Encoding utf8
+      - name: Upload Windows application artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ImageGlass-${{ matrix.kind }}-14.17.1-win-x64
+          name: ImageGlass-bba9fca-win-x64
           path: ${{ runner.temp }}/ImageGlass
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
-      - name: Upload evidence and rebased diff
+      - name: Upload manual test files
+        uses: actions/upload-artifact@v7
+        with:
+          name: ImageGlass-bba9fca-test-files
+          path: ${{ runner.temp }}/manual-tests
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload build and test evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: validation-${{ matrix.kind }}-14.17.1
+          name: validation-bba9fca
           path: |
             ${{ runner.temp }}/source.json
             ${{ runner.temp }}/observations.json
@@ -164,6 +168,5 @@ jobs:
             ${{ runner.temp }}/build.log
             ${{ runner.temp }}/publish.log
             ${{ runner.temp }}/test-build.log
-            ${{ runner.temp }}/imageglass-current-upstream.patch
           if-no-files-found: warn
           retention-days: 14
