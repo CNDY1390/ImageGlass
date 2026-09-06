@@ -1,7 +1,7 @@
 diff --git a/source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs b/source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs
 --- a/source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs
 +++ b/source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs
-@@ -881,7 +881,8 @@
+@@ -881,10 +881,17 @@
              if (result.MultiFrames is not null)
              {
                  // convert GIF to non-GIF formats, we need to coalesce all frames
@@ -11,3 +11,12 @@ diff --git a/source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCod
                      && !destExt.Equals(".gif", StringComparison.OrdinalIgnoreCase))
                  {
                      result.MultiFrames.Coalesce();
++
++                    // GIF animation frames are not TIFF/Photoshop layers.
++                    foreach (var imgM in result.MultiFrames)
++                    {
++                        imgM.Settings.RemoveDefine(MagickFormat.Tiff, "write-layers");
++                    }
+                 }
+ 
+                 await result.MultiFrames.WriteAsync(destFilePath, token);

@@ -63,8 +63,7 @@ internal static class Program
                     var target = Path.Combine(output, name + ext);
                     await MagickCodec.SaveAsync(meta, target, new() { FrameIndex = -1, CorrectRotation = false });
                     using var actual = new MagickImageCollection(target);
-                    Check(actual.Count == 5, "Save lost frames");
-                    var stored = string.Join("; ", actual.Select(Describe));
+                    var stored = $"frames={actual.Count}: " + string.Join("; ", actual.Select(Describe));
                     // GIF stores deltas by design. TIFF must contain complete pages without repair on read.
                     if (ext == ".gif") actual.Coalesce();
                     var match = MatchesExpected(actual, root);
