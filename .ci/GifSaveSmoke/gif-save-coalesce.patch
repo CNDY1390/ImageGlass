@@ -1,0 +1,13 @@
+diff --git a/source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs b/source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs
+--- a/source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs
++++ b/source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs
+@@ -881,7 +881,8 @@
+             if (result.MultiFrames is not null)
+             {
+                 // convert GIF to non-GIF formats, we need to coalesce all frames
+-                if (meta.FileExtension.Equals(".gif", StringComparison.OrdinalIgnoreCase)
++                if (result.MultiFrames.Count > 0
++                    && result.MultiFrames[0].Format == MagickFormat.Gif
+                     && !destExt.Equals(".gif", StringComparison.OrdinalIgnoreCase))
+                 {
+                     result.MultiFrames.Coalesce();
