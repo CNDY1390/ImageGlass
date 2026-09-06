@@ -1,0 +1,24 @@
+diff --git a/source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs b/source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs
+--- a/source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs
++++ b/source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs
+@@ -699,3 +699,3 @@
+     /// <summary>
+-    /// Checks related diagnostics too, so a decoder error cannot hide a policy or resource error.
++    /// Allows a content-based retry for decoder errors when the filename supplied a format hint.
+     /// </summary>
+@@ -725,2 +725,3 @@
++        // Unknown extensions supply no hint, so retrying would repeat the same format detection.
+         return MagickFormatInfo.Create(filePath) is not null;
+     }
+@@ -888,6 +889,10 @@
+                     result.MultiFrames.Coalesce();
++                }
+ 
+-                    // GIF animation frames are not TIFF/Photoshop layers.
++                // ParseSettings can inherit TIFF layer output from an incorrect source extension.
++                if (result.MultiFrames.Count > 0
++                    && MagickFormatInfo.Create(result.MultiFrames[0].Format)?.ModuleFormat != MagickFormat.Tiff)
++                {
+                     foreach (var imgM in result.MultiFrames)
+                     {
+                         imgM.Settings.RemoveDefine(MagickFormat.Tiff, "write-layers");

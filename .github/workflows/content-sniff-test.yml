@@ -1,20 +1,23 @@
-name: Verify GIF save coalescing on PR 2446
+name: Verify non-TIFF layer output on PR 2446
+
 on:
   push:
     branches: [ci/content-sniff-fallback]
-    paths: [.github/workflows/content-sniff-test.yml, '.ci/GifSaveSmoke/**']
+    paths: [.github/workflows/content-sniff-test.yml]
+
 permissions:
   contents: read
+
 concurrency:
-  group: pr2446-gif-save
+  group: pr2446-nontiff-save
   cancel-in-progress: false
-defaults:
-  run:
-    shell: pwsh
+
 env:
-  SOURCE_SHA: bba9fca1061e865742d601f6715656ccf28677af
+  SOURCE_SHA: b05f7b324824949b1972e7d72f82c208eab59d76
   EXPECTED_MAGICK: 14.17.1
   SOURCE_KIND: pr-head
+  TEST_MODE: fixed
+
 jobs:
   compare:
     if: github.repository == 'CNDY1390/ImageGlass'
@@ -24,56 +27,60 @@ jobs:
       fail-fast: false
       matrix:
         mode: [before, fixed]
-    name: GIF save ${{ matrix.mode }} - Windows x64
+    name: Non-TIFF save ${{ matrix.mode }} - Windows x64
     env:
-      TEST_MODE: ${{ matrix.mode }}
+      LAYER_MODE: ${{ matrix.mode }}
     steps:
-      - name: Checkout exact PR head
+      - name: Checkout exact PR head b05f7b3
         uses: actions/checkout@v6
         with:
           repository: CNDY1390/ImageGlass
-          ref: bba9fca1061e865742d601f6715656ccf28677af
+          ref: b05f7b324824949b1972e7d72f82c208eab59d76
           fetch-depth: 2
           path: app
           persist-credentials: false
-      - name: Checkout CI-only tests and incremental fix
+      - name: Checkout CI-only test harness
         uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
           path: harness
           sparse-checkout: .ci
           persist-credentials: false
-      - name: Prepare source and record exact tree
+      - name: Prepare comparison and record exact source
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if ((git -C app rev-parse HEAD).Trim() -ne $env:SOURCE_SHA) { throw 'Wrong PR head' }
+          if ((git -C app rev-parse HEAD).Trim() -ne $env:SOURCE_SHA) { throw 'Wrong source SHA' }
+          if ((git -C app rev-parse 'HEAD^{tree}').Trim() -ne 'bd7ed75f91b32fca6c0ac5dab6f5f3bb385743b7') { throw 'Wrong source tree' }
           $file = 'source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs'
-          if ($env:TEST_MODE -eq 'fixed') {
-            $patch = Join-Path $env:GITHUB_WORKSPACE 'harness/.ci/GifSaveSmoke/gif-save-coalesce.patch'
+          if ($env:LAYER_MODE -eq 'fixed') {
+            $patch = Join-Path $env:GITHUB_WORKSPACE 'harness/.ci/NonTiffSaveSmoke/nontiff-save.patch'
             git -C app apply --check $patch
             if ($LASTEXITCODE -ne 0) { throw 'Patch check failed' }
             git -C app apply $patch
             if ($LASTEXITCODE -ne 0) { throw 'Patch apply failed' }
             $files = @(git -C app diff --name-only)
-            if ($files.Count -ne 1 -or $files[0] -ne $file) { throw 'Unexpected modified files' }
+            if ($files.Count -ne 1 -or $files[0] -ne $file) { throw 'Unexpected scope' }
             git -C app diff --check
-            if ($LASTEXITCODE -ne 0) { throw 'Whitespace error' }
+            if ($LASTEXITCODE -ne 0) { throw 'Whitespace check failed' }
             git -C app add -- $file
             if ($LASTEXITCODE -ne 0) { throw 'Staging failed' }
           }
           $tree = (git -C app write-tree).Trim()
-          if ($LASTEXITCODE -ne 0) { throw 'Tree check failed' }
           "TESTED_TREE=$tree" >> $env:GITHUB_ENV
           [xml]$packages = Get-Content app/source/Directory.Packages.props
           $versions = @($packages.Project.ItemGroup.PackageVersion | Where-Object { $_.Include -like 'Magick.NET-*' } | ForEach-Object { $_.Version } | Select-Object -Unique)
-          if ($versions.Count -ne 1 -or $versions[0] -ne $env:EXPECTED_MAGICK) { throw 'Unexpected Magick version' }
-          git -C app diff --cached --binary --full-index "--output=$env:RUNNER_TEMP/gif-save-coalesce.patch" HEAD
-          if ($LASTEXITCODE -ne 0) { throw 'Diff export failed' }
+          if ($versions.Count -ne 1 -or $versions[0] -ne $env:EXPECTED_MAGICK) { throw 'Unexpected dependency version' }
+          git -C app diff --cached --binary --full-index "--output=$env:RUNNER_TEMP/nontiff-save.patch" HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Patch export failed' }
+          git -C app diff --cached --stat HEAD
+          Copy-Item "app/$file" "$env:RUNNER_TEMP/MagickCodec.cs"
           @{
             source_sha = $env:SOURCE_SHA
             source_tree = $tree
-            mode = $env:TEST_MODE
+            mode = $env:LAYER_MODE
             magick = $versions[0]
+            codec_blob = (git -C app rev-parse ":$file").Trim()
             workflow_sha = $env:GITHUB_SHA
             run_url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/source.json" -Encoding utf8
@@ -83,62 +90,66 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - name: Build and publish Windows application
+        shell: pwsh
         run: |
           dotnet publish app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 -p:PublishAot=false -p:PublishReadyToRun=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:SelfContained=true -o "$env:RUNNER_TEMP/ImageGlass" 2>&1 | Tee-Object "$env:RUNNER_TEMP/publish.log"
-          if ($LASTEXITCODE -ne 0) { throw "Build/publish failed: $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw 'Build/publish failed' }
       - name: Build regression runners
+        shell: pwsh
         run: |
           ./harness/.ci/OfficialCases/add-cases.ps1
           $project = Join-Path $env:GITHUB_WORKSPACE 'app/source/ImageGlass.Lib/ImageGlass.Lib.csproj'
-          dotnet build harness/.ci/BaseMergeSmoke/BaseMergeSmoke.csproj -c Debug -p:Platform=x64 -p:PublishAot=false "-p:ImageGlassProject=$project" -o "$env:RUNNER_TEMP/runner"
-          if ($LASTEXITCODE -ne 0) { throw 'Existing runner failed to build' }
-          dotnet build harness/.ci/GifSaveSmoke/GifSaveSmoke.csproj -c Debug -p:Platform=x64 -p:PublishAot=false "-p:ImageGlassProject=$project" -o "$env:RUNNER_TEMP/gif-runner"
-          if ($LASTEXITCODE -ne 0) { throw 'GIF runner failed to build' }
-          Copy-Item "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" "$env:RUNNER_TEMP/runner" -Force
-          Copy-Item "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" "$env:RUNNER_TEMP/gif-runner" -Force
+          foreach ($runner in @('BaseMergeSmoke', 'GifSaveSmoke', 'NonTiffSaveSmoke')) {
+            dotnet build "harness/.ci/$runner/$runner.csproj" -c Debug -p:Platform=x64 -p:PublishAot=false "-p:ImageGlassProject=$project" -o "$env:RUNNER_TEMP/$runner" 2>&1 | Tee-Object "$env:RUNNER_TEMP/$runner-build.log"
+            if ($LASTEXITCODE -ne 0) { throw "Runner build failed: $runner" }
+            Copy-Item "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" "$env:RUNNER_TEMP/$runner" -Force
+          }
           "EXPECTED_LIB_SHA256=$((Get-FileHash "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" -Algorithm SHA256).Hash)" >> $env:GITHUB_ENV
-      - name: Run existing decoding regression checks
+      - name: Existing decoding regression checks
+        shell: pwsh
         run: |
           $env:OFFICIAL_CASES = Join-Path $env:GITHUB_WORKSPACE 'harness/.ci/OfficialCases/cases.json'
-          dotnet "$env:RUNNER_TEMP/runner/BaseMergeSmoke.dll" "$env:RUNNER_TEMP/fixtures" "$env:RUNNER_TEMP/observations.json" 2>&1 | Tee-Object "$env:RUNNER_TEMP/observations.log"
+          dotnet "$env:RUNNER_TEMP/BaseMergeSmoke/BaseMergeSmoke.dll" "$env:RUNNER_TEMP/fixtures" "$env:RUNNER_TEMP/observations.json" 2>&1 | Tee-Object "$env:RUNNER_TEMP/observations.log"
           if ($LASTEXITCODE -ne 0) { throw 'Decoding regression checks failed' }
-      - name: Test optimized GIF saving with independent expected frames
+      - name: Existing GIF and ICO save checks
+        shell: pwsh
         run: |
-          dotnet "$env:RUNNER_TEMP/gif-runner/GifSaveSmoke.dll" "$env:RUNNER_TEMP/gif-inputs" "$env:RUNNER_TEMP/gif-results" "$env:RUNNER_TEMP/gif-save.json" "$env:RUNNER_TEMP/fixtures/png-first-frame.ico" 2>&1 | Tee-Object "$env:RUNNER_TEMP/gif-save.log"
-          if ($LASTEXITCODE -ne 0) { throw 'GIF saving checks failed' }
+          dotnet "$env:RUNNER_TEMP/GifSaveSmoke/GifSaveSmoke.dll" "$env:RUNNER_TEMP/gif-inputs" "$env:RUNNER_TEMP/gif-results" "$env:RUNNER_TEMP/gif-save.json" "$env:RUNNER_TEMP/fixtures/png-first-frame.ico" 2>&1 | Tee-Object "$env:RUNNER_TEMP/gif-save.log"
+          if ($LASTEXITCODE -ne 0) { throw 'GIF regression checks failed' }
+      - name: Standard TIFF pages and diagnostic assertions
+        shell: pwsh
+        run: |
+          dotnet "$env:RUNNER_TEMP/NonTiffSaveSmoke/NonTiffSaveSmoke.dll" "$env:RUNNER_TEMP/layer-inputs" "$env:RUNNER_TEMP/layer-results" "$env:RUNNER_TEMP/layer-save.json" "$env:RUNNER_TEMP/fixtures" "$env:RUNNER_TEMP/gif-results" 2>&1 | Tee-Object "$env:RUNNER_TEMP/layer-save.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Non-TIFF save/diagnostic checks failed' }
           git -C app diff --exit-code
-          if ($LASTEXITCODE -ne 0) { throw 'Production source changed after staging' }
+          if ($LASTEXITCODE -ne 0) { throw 'Source changed after staging' }
           if ((git -C app write-tree).Trim() -ne $env:TESTED_TREE) { throw 'Tested tree changed' }
-          Get-Content "$env:RUNNER_TEMP/gif-save.log" | ForEach-Object { $_ >> $env:GITHUB_STEP_SUMMARY }
-      - name: Package fixed portable build and samples
+          Get-Content "$env:RUNNER_TEMP/layer-save.log" | ForEach-Object { $_ >> $env:GITHUB_STEP_SUMMARY }
+      - name: Package candidate and manual samples
         if: matrix.mode == 'fixed'
+        shell: pwsh
         run: |
           $output = Join-Path $env:RUNNER_TEMP 'ImageGlass'
           $samples = Join-Path $env:RUNNER_TEMP 'manual-tests'
-          Copy-Item "$env:RUNNER_TEMP/gif-inputs" $samples -Recurse -Force
-          Copy-Item "$env:RUNNER_TEMP/fixtures/01-png-as-tif.tif", "$env:RUNNER_TEMP/fixtures/04-two-frame-gif-as-tif.tif" $samples
-          Copy-Item "$env:RUNNER_TEMP/fixtures/png-first-frame.ico" "$samples/05-valid-png-compressed.ico"
-          Copy-Item "$env:RUNNER_TEMP/fixtures/corrupt.tif" "$samples/06-corrupt.tif"
+          Copy-Item "$env:RUNNER_TEMP/layer-inputs" $samples -Recurse -Force
           @(
-            'Candidate: bba9fca plus the SaveAsync GIF coalescing condition fix.',
-            'Open 07-optimized-gif-as-tif.tif and Save As a NEW result.tiff; reopen result.tiff.',
-            'Use Ctrl+Right to inspect all FIVE TIFF pages. Each must be 64x48 with the complete black border.',
-            'Compare each page with reference/frame-01.png through frame-05.png.',
-            'Frame 1: white canvas, black border. Frame 2: red rectangle added. Frame 3: red and blue rectangles.',
-            'Frame 4: blue disappears, green rectangle appears. Frame 5: yellow is added; red and green remain.',
-            'The GIF has offsets, transparency and restore-previous disposal. Restore-background disposal is not covered.',
-            'reference/07-original.gif is a byte-identical correctly named control.',
-            '06-corrupt.tif must still report an error without a crash. Do not overwrite input files.',
-            'Automated tests use SaveAsync; manual GUI Save As confirmation is still required.'
+            'PR 2446: b05f7b3 plus the non-TIFF write-layers cleanup patch.',
+            'Close old ImageGlass windows. Extract the application into a new folder and run its ImageGlass.exe.',
+            'Open 08-two-full-frames-webp-as-tif.tif, Save As a NEW result.tiff, then reopen it.',
+            'Expected: two full 32x24 pages, red then blue. Ctrl+Right switches pages.',
+            'reference/08-original.webp contains identical bytes with the correct extension.',
+            'The automated test reads TIFF with IgnoreLayers=true: default frame count alone can include Photoshop layers and miss the bug.',
+            'Do not overwrite inputs. True-TIFF files in reference/ are existing-behavior controls, not new regression claims.',
+            'GUI, in-flight cancellation, hidden native I/O faults, real RAW, PS/PDF and Release/AOT were not tested.'
           ) | Set-Content "$samples/README.txt" -Encoding utf8
-          Get-ChildItem $samples -Recurse -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | Sort-Object FullName | ForEach-Object {
+          Get-ChildItem $samples -Recurse -File | Sort-Object FullName | ForEach-Object {
             $relative = [IO.Path]::GetRelativePath($samples, $_.FullName).Replace('\', '/')
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $relative"
           } | Set-Content "$samples/SHA256SUMS.txt" -Encoding utf8
           Copy-Item 'app/source/__assets/__app/*' $output -Recurse -Force
           [IO.File]::WriteAllBytes((Join-Path $output '.igportable'), [byte[]]@())
           @{
-            _Metadata = @{ Description = 'Isolated GIF save coalescing test'; Version = 10 }
+            _Metadata = @{ Description = 'PR 2446 isolated non-TIFF save test'; Version = 10 }
             QuickSetupVersion = 10
             AutoUpdate = '0'
             EnableMultiInstances = $true
@@ -149,38 +160,42 @@ jobs:
           } | ConvertTo-Json | Set-Content "$output/igconfig.json" -Encoding utf8
           Copy-Item $samples "$output/_test_samples" -Recurse -Force
           New-Item -ItemType Directory -Path "$output/_test_results" -Force | Out-Null
-          Copy-Item "$env:RUNNER_TEMP/source.json", "$env:RUNNER_TEMP/observations.json", "$env:RUNNER_TEMP/gif-save.json", "$env:RUNNER_TEMP/gif-save.log" "$output/_test_results"
-          @("Source: $env:SOURCE_SHA + gif-save-coalesce.patch", "Tree: $env:TESTED_TREE", "Magick.NET: $env:EXPECTED_MAGICK", "Run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID", 'Not an official release. See _test_samples/README.txt.') | Set-Content "$output/TEST-BUILD.txt" -Encoding utf8
-      - name: Upload fixed Windows application
+          Copy-Item "$env:RUNNER_TEMP/source.json", "$env:RUNNER_TEMP/observations.json", "$env:RUNNER_TEMP/gif-save.json", "$env:RUNNER_TEMP/layer-save.json", "$env:RUNNER_TEMP/layer-save.log" "$output/_test_results"
+          @("Source: $env:SOURCE_SHA + nontiff-save.patch", "Tree: $env:TESTED_TREE", "Magick.NET: $env:EXPECTED_MAGICK", "Run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID", 'Not an official release; source remains unchanged on the PR branch.') | Set-Content "$output/TEST-BUILD.txt" -Encoding utf8
+      - name: Upload Windows application
         if: matrix.mode == 'fixed'
         uses: actions/upload-artifact@v7
         with:
-          name: ImageGlass-gif-save-fixed-win-x64
+          name: ImageGlass-nontiff-save-fixed-win-x64
           path: ${{ runner.temp }}/ImageGlass
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
-      - name: Upload manual test files
+      - name: Upload test files
         if: matrix.mode == 'fixed'
         uses: actions/upload-artifact@v7
         with:
-          name: ImageGlass-gif-save-test-files
+          name: ImageGlass-nontiff-save-test-files
           path: ${{ runner.temp }}/manual-tests
           if-no-files-found: error
           retention-days: 14
-      - name: Upload evidence and patch
+      - name: Upload evidence and incremental patch
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: gif-save-evidence-${{ matrix.mode }}
+          name: nontiff-save-evidence-${{ matrix.mode }}
           path: |
             ${{ runner.temp }}/source.json
+            ${{ runner.temp }}/MagickCodec.cs
+            ${{ runner.temp }}/nontiff-save.patch
+            ${{ runner.temp }}/*-build.log
             ${{ runner.temp }}/publish.log
             ${{ runner.temp }}/observations.json
             ${{ runner.temp }}/observations.log
             ${{ runner.temp }}/gif-save.json
             ${{ runner.temp }}/gif-save.log
-            ${{ runner.temp }}/gif-results
-            ${{ runner.temp }}/gif-save-coalesce.patch
+            ${{ runner.temp }}/layer-save.json
+            ${{ runner.temp }}/layer-save.log
+            ${{ runner.temp }}/layer-results
           if-no-files-found: warn
           retention-days: 14
