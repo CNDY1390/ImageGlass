@@ -33,7 +33,7 @@ internal static class Program
         Check(libraryHash.Equals(Environment.GetEnvironmentVariable("EXPECTED_LIB_SHA256"), StringComparison.OrdinalIgnoreCase), "Not testing the published library");
         Check(MagickNET.Version.Split(' ', StringSplitOptions.RemoveEmptyEntries)[^1] == "14.17.1", "Wrong Magick package");
         var zipBytes = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "fixtures.zip"));
-        Check(Hash(zipBytes).Equals("152e2d38da7c735f9716b42f5cfa4772b02189c873d7587a706b7093a615d900", StringComparison.OrdinalIgnoreCase), "Fixture ZIP hash mismatch");
+        Check(Hash(zipBytes).Equals("ec733cb3a7ee517a7e1bad5af2fa7a153a38b2b976dfc3d3e6c1de2a2adfdda0", StringComparison.OrdinalIgnoreCase), "Fixture ZIP hash mismatch");
         using (var packed = new MemoryStream(zipBytes)) ZipFile.ExtractToDirectory(packed, root, true);
         var gif = Path.Combine(root, "reference", "07-original.gif");
         var disguised = Path.Combine(root, "07-optimized-gif-as-tif.tif");

@@ -1,22 +1,20 @@
 name: Verify GIF save coalescing on PR 2446
-
 on:
   push:
     branches: [ci/content-sniff-fallback]
     paths: [.github/workflows/content-sniff-test.yml, '.ci/GifSaveSmoke/**']
-
 permissions:
   contents: read
-
 concurrency:
   group: pr2446-gif-save
   cancel-in-progress: false
-
+defaults:
+  run:
+    shell: pwsh
 env:
   SOURCE_SHA: bba9fca1061e865742d601f6715656ccf28677af
   EXPECTED_MAGICK: 14.17.1
   SOURCE_KIND: pr-head
-
 jobs:
   compare:
     if: github.repository == 'CNDY1390/ImageGlass'
@@ -46,7 +44,6 @@ jobs:
           sparse-checkout: .ci
           persist-credentials: false
       - name: Prepare source and record exact tree
-        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           if ((git -C app rev-parse HEAD).Trim() -ne $env:SOURCE_SHA) { throw 'Wrong PR head' }
@@ -85,18 +82,11 @@ jobs:
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
-      - name: Build Windows application
-        shell: pwsh
-        run: |
-          dotnet build app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 2>&1 | Tee-Object "$env:RUNNER_TEMP/build.log"
-          if ($LASTEXITCODE -ne 0) { throw "Build failed: $LASTEXITCODE" }
-      - name: Publish candidate
-        shell: pwsh
+      - name: Build and publish Windows application
         run: |
           dotnet publish app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 -p:PublishAot=false -p:PublishReadyToRun=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:SelfContained=true -o "$env:RUNNER_TEMP/ImageGlass" 2>&1 | Tee-Object "$env:RUNNER_TEMP/publish.log"
-          if ($LASTEXITCODE -ne 0) { throw "Publish failed: $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "Build/publish failed: $LASTEXITCODE" }
       - name: Build regression runners
-        shell: pwsh
         run: |
           ./harness/.ci/OfficialCases/add-cases.ps1
           $project = Join-Path $env:GITHUB_WORKSPACE 'app/source/ImageGlass.Lib/ImageGlass.Lib.csproj'
@@ -108,13 +98,11 @@ jobs:
           Copy-Item "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" "$env:RUNNER_TEMP/gif-runner" -Force
           "EXPECTED_LIB_SHA256=$((Get-FileHash "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" -Algorithm SHA256).Hash)" >> $env:GITHUB_ENV
       - name: Run existing decoding regression checks
-        shell: pwsh
         run: |
           $env:OFFICIAL_CASES = Join-Path $env:GITHUB_WORKSPACE 'harness/.ci/OfficialCases/cases.json'
           dotnet "$env:RUNNER_TEMP/runner/BaseMergeSmoke.dll" "$env:RUNNER_TEMP/fixtures" "$env:RUNNER_TEMP/observations.json" 2>&1 | Tee-Object "$env:RUNNER_TEMP/observations.log"
           if ($LASTEXITCODE -ne 0) { throw 'Decoding regression checks failed' }
       - name: Test optimized GIF saving with independent expected frames
-        shell: pwsh
         run: |
           dotnet "$env:RUNNER_TEMP/gif-runner/GifSaveSmoke.dll" "$env:RUNNER_TEMP/gif-inputs" "$env:RUNNER_TEMP/gif-results" "$env:RUNNER_TEMP/gif-save.json" "$env:RUNNER_TEMP/fixtures/png-first-frame.ico" 2>&1 | Tee-Object "$env:RUNNER_TEMP/gif-save.log"
           if ($LASTEXITCODE -ne 0) { throw 'GIF saving checks failed' }
@@ -124,7 +112,6 @@ jobs:
           Get-Content "$env:RUNNER_TEMP/gif-save.log" | ForEach-Object { $_ >> $env:GITHUB_STEP_SUMMARY }
       - name: Package fixed portable build and samples
         if: matrix.mode == 'fixed'
-        shell: pwsh
         run: |
           $output = Join-Path $env:RUNNER_TEMP 'ImageGlass'
           $samples = Join-Path $env:RUNNER_TEMP 'manual-tests'
@@ -138,11 +125,16 @@ jobs:
             'Use Ctrl+Right to inspect all FIVE TIFF pages. Each must be 64x48 with the complete black border.',
             'Compare each page with reference/frame-01.png through frame-05.png.',
             'Frame 1: white canvas, black border. Frame 2: red rectangle added. Frame 3: red and blue rectangles.',
-            'Frame 4: blue disappears, green rectangle appears. Frame 5: green disappears, yellow rectangle appears; red stays.',
+            'Frame 4: blue disappears, green rectangle appears. Frame 5: yellow is added; red and green remain.',
+            'The GIF has offsets, transparency and restore-previous disposal. Restore-background disposal is not covered.',
             'reference/07-original.gif is a byte-identical correctly named control.',
             '06-corrupt.tif must still report an error without a crash. Do not overwrite input files.',
             'Automated tests use SaveAsync; manual GUI Save As confirmation is still required.'
           ) | Set-Content "$samples/README.txt" -Encoding utf8
+          Get-ChildItem $samples -Recurse -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | Sort-Object FullName | ForEach-Object {
+            $relative = [IO.Path]::GetRelativePath($samples, $_.FullName).Replace('\', '/')
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $relative"
+          } | Set-Content "$samples/SHA256SUMS.txt" -Encoding utf8
           Copy-Item 'app/source/__assets/__app/*' $output -Recurse -Force
           [IO.File]::WriteAllBytes((Join-Path $output '.igportable'), [byte[]]@())
           @{
@@ -183,7 +175,6 @@ jobs:
           name: gif-save-evidence-${{ matrix.mode }}
           path: |
             ${{ runner.temp }}/source.json
-            ${{ runner.temp }}/build.log
             ${{ runner.temp }}/publish.log
             ${{ runner.temp }}/observations.json
             ${{ runner.temp }}/observations.log
