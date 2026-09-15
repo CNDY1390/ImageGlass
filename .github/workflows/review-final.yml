@@ -1,0 +1,174 @@
+name: Recheck PR 2446 maintainer changes
+on:
+  push:
+    branches: [ci/content-sniff-fallback]
+    paths: [.github/workflows/review-final.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pr2446-review-final
+  cancel-in-progress: false
+env:
+  SOURCE_SHA: c5aad180e71eef4c7c6a0dea0b61646dc4eb95ed
+  EXPECTED_MAGICK: 14.17.1
+  SOURCE_KIND: pr-head
+  TEST_MODE: fixed
+  LAYER_MODE: fixed
+jobs:
+  recheck:
+    if: github.repository == 'CNDY1390/ImageGlass'
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [before, fixed]
+    name: Review ${{ matrix.mode }} - Windows x64
+    env:
+      REVIEW_MODE: ${{ matrix.mode }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: CNDY1390/ImageGlass
+          ref: c5aad180e71eef4c7c6a0dea0b61646dc4eb95ed
+          fetch-depth: 2
+          path: app
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          path: harness
+          sparse-checkout: .ci
+          persist-credentials: false
+      - name: Prepare exact candidate and preserve source identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git -C app rev-parse HEAD).Trim() -ne $env:SOURCE_SHA) { throw 'Wrong source commit' }
+          if ((git -C app rev-parse 'HEAD^{tree}').Trim() -ne '0cc8916365e32d6d9b336286e1b231db6ab660df') { throw 'Wrong base tree' }
+          $file = 'source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs'
+          if ($env:REVIEW_MODE -eq 'fixed') {
+            git -C app apply --index "$env:GITHUB_WORKSPACE/harness/.ci/MaintainerReviewSmoke/maintainer-review.patch"
+            if ($LASTEXITCODE -ne 0) { throw 'Patch failed' }
+          }
+          $tree = (git -C app write-tree).Trim()
+          $want = if ($env:REVIEW_MODE -eq 'fixed') { 'a420927086ca997c03c6d67fe1cf333436f44ab3' } else { '0cc8916365e32d6d9b336286e1b231db6ab660df' }
+          if ($tree -ne $want) { throw 'Unexpected tested tree' }
+          "TESTED_TREE=$tree" >> $env:GITHUB_ENV
+          git -C app diff --cached --check
+          if ($LASTEXITCODE -ne 0) { throw 'Whitespace check failed' }
+          git -C app diff --cached --binary --full-index "--output=$env:RUNNER_TEMP/maintainer-review.patch" HEAD
+          Copy-Item "app/$file" "$env:RUNNER_TEMP/MagickCodec.cs"
+          @{ source_sha=$env:SOURCE_SHA; source_tree=$tree; codec_blob=(git -C app rev-parse ":$file").Trim(); mode=$env:REVIEW_MODE; workflow_sha=$env:GITHUB_SHA; magick=$env:EXPECTED_MAGICK; run_url="$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID" } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/source.json" -Encoding utf8
+          Get-Content "$env:RUNNER_TEMP/source.json"
+      - name: PowerShell submission script syntax and non-mutating gates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = "$env:GITHUB_WORKSPACE/harness/.ci/MaintainerReviewSmoke/Submit.ps1"
+          $tokens = $null; $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { throw ($errors | Out-String) }
+          git -C app switch -c local-submit-script-check
+          if ($LASTEXITCODE -ne 0) { throw 'Local CI branch creation failed' }
+          & $script -Repo "$env:GITHUB_WORKSPACE/app" -CheckOnly
+          $probe = "$env:GITHUB_WORKSPACE/app/untracked-gate-probe.txt"
+          $blocked = $false
+          try {
+            Set-Content $probe 'must not be included in a commit'
+            try { & $script -Repo "$env:GITHUB_WORKSPACE/app" -CheckOnly }
+            catch {
+              if ($_.Exception.Message -notlike 'Uncommitted changes differ*') { throw }
+              $blocked = $true
+            }
+          }
+          finally { Remove-Item $probe -ErrorAction SilentlyContinue }
+          if (-not $blocked) { throw 'Dirty worktree was not rejected' }
+          if ((git -C app write-tree).Trim() -ne $env:TESTED_TREE) { throw 'CheckOnly mutated index' }
+          git -C app diff --exit-code
+          if ($LASTEXITCODE -ne 0) { throw 'CheckOnly mutated files' }
+          @{syntax='passed'; check_only='passed'; dirty_worktree_gate='passed'; mode=$env:REVIEW_MODE; script_sha256=(Get-FileHash $script).Hash; signing='not run: private key remains on user machine'; push='not run'} | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/script-checks.json" -Encoding utf8
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build Windows application
+        shell: pwsh
+        run: |
+          dotnet publish app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 -p:PublishAot=false -p:PublishReadyToRun=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:SelfContained=true -o "$env:RUNNER_TEMP/ImageGlass" 2>&1 | Tee-Object "$env:RUNNER_TEMP/publish.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Publish failed' }
+      - name: Build existing regression harness and maintainer checks
+        shell: pwsh
+        run: |
+          ./harness/.ci/OfficialCases/add-cases.ps1
+          $path = 'harness/.ci/NonTiffSaveSmoke/Program.cs'
+          $text = [IO.File]::ReadAllText($path)
+          $old = 'Check(caught.Data["ImageGlass.ContentSniffFallbackException"] is Exception, "Retry error was lost");'
+          $new = 'Check((caught.Data["ImageGlass.ContentSniffFallbackException"] is Exception) == (Environment.GetEnvironmentVariable("REVIEW_MODE") != "fixed"), "Unexpected fallback Data policy");'
+          if (-not $text.Contains($old)) { throw 'Old Data assertion not found' }
+          $text = $text.Replace($old, $new).Replace('caught.Data["ImageGlass.ContentSniffFallbackException"]!.GetType().Name', '(caught.Data["ImageGlass.ContentSniffFallbackException"]?.GetType().Name ?? "removed per review")')
+          [IO.File]::WriteAllText($path, $text)
+          $path = 'harness/.ci/MaintainerReviewSmoke/Program.cs'
+          $text = [IO.File]::ReadAllText($path)
+          $old = 'Check(result == !fixedMode, "Wrong retry eligibility for DNG module " + ext);'
+          $new = $old + ' var upperResult = (bool)guard.Invoke(null, [new MagickCoderErrorException("synthetic rejection"), new MagickReadSettings(), "fixture" + ext.ToUpperInvariant()])!; Check(upperResult == result, "Uppercase RAW alias differs");'
+          if (-not $text.Contains($old)) { throw 'RAW alias assertion not found' }
+          [IO.File]::WriteAllText($path, $text.Replace($old, $new))
+          $project = Join-Path $env:GITHUB_WORKSPACE 'app/source/ImageGlass.Lib/ImageGlass.Lib.csproj'
+          foreach ($runner in @('BaseMergeSmoke','GifSaveSmoke','NonTiffSaveSmoke','MaintainerReviewSmoke')) {
+            dotnet build "harness/.ci/$runner/$runner.csproj" -c Debug -p:Platform=x64 -p:PublishAot=false "-p:ImageGlassProject=$project" -o "$env:RUNNER_TEMP/$runner"
+            if ($LASTEXITCODE -ne 0) { throw "Build failed: $runner" }
+            Copy-Item "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" "$env:RUNNER_TEMP/$runner" -Force
+          }
+          "EXPECTED_LIB_SHA256=$((Get-FileHash "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll").Hash)" >> $env:GITHUB_ENV
+      - name: Existing decode and save regressions
+        shell: pwsh
+        run: |
+          $env:OFFICIAL_CASES = Join-Path $env:GITHUB_WORKSPACE 'harness/.ci/OfficialCases/cases.json'
+          dotnet "$env:RUNNER_TEMP/BaseMergeSmoke/BaseMergeSmoke.dll" "$env:RUNNER_TEMP/fixtures" "$env:RUNNER_TEMP/observations.json" 2>&1 | Tee-Object "$env:RUNNER_TEMP/observations.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Decode regression failed' }
+          dotnet "$env:RUNNER_TEMP/GifSaveSmoke/GifSaveSmoke.dll" "$env:RUNNER_TEMP/gif-inputs" "$env:RUNNER_TEMP/gif-results" "$env:RUNNER_TEMP/gif-save.json" "$env:RUNNER_TEMP/fixtures/png-first-frame.ico" 2>&1 | Tee-Object "$env:RUNNER_TEMP/gif-save.log"
+          if ($LASTEXITCODE -ne 0) { throw 'GIF/ICO saving regression failed' }
+          dotnet "$env:RUNNER_TEMP/NonTiffSaveSmoke/NonTiffSaveSmoke.dll" "$env:RUNNER_TEMP/layer-inputs" "$env:RUNNER_TEMP/layer-results" "$env:RUNNER_TEMP/layer-save.json" "$env:RUNNER_TEMP/fixtures" "$env:RUNNER_TEMP/gif-results" 2>&1 | Tee-Object "$env:RUNNER_TEMP/layer-save.log"
+          if ($LASTEXITCODE -ne 0) { throw 'TIFF pages/diagnostics regression failed' }
+      - name: Reject RAW reinterpretation and test module aliases
+        shell: pwsh
+        run: |
+          dotnet "$env:RUNNER_TEMP/MaintainerReviewSmoke/MaintainerReviewSmoke.dll" "$env:RUNNER_TEMP/review-inputs" "$env:RUNNER_TEMP/review.json" 2>&1 | Tee-Object "$env:RUNNER_TEMP/review.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Maintainer regression failed' }
+          git -C app diff --exit-code
+          if ($LASTEXITCODE -ne 0 -or (git -C app write-tree).Trim() -ne $env:TESTED_TREE) { throw 'Source identity changed' }
+      - name: Package isolated Windows build
+        if: matrix.mode == 'fixed'
+        shell: pwsh
+        run: |
+          $output = "$env:RUNNER_TEMP/ImageGlass"
+          Copy-Item app/source/__assets/__app/* $output -Recurse -Force
+          [IO.File]::WriteAllBytes("$output/.igportable", [byte[]]@())
+          @{_Metadata=@{Description='PR 2446 review verification';Version=10};QuickSetupVersion=10;AutoUpdate='0';EnableMultiInstances=$true;EnableWelcomeImage=$false;EnableLastSeenImage=$false;ShowGallery=$true;EnableGalleryShellThumbnail=$false} | ConvertTo-Json | Set-Content "$output/igconfig.json" -Encoding utf8
+          Copy-Item "$env:RUNNER_TEMP/review-inputs" "$output/_test_samples" -Recurse
+          Copy-Item "$env:RUNNER_TEMP/source.json" "$output/TESTED-SOURCE.json"
+      - uses: actions/upload-artifact@v7
+        if: matrix.mode == 'fixed'
+        with:
+          name: ImageGlass-review-verified-win-x64
+          path: ${{ runner.temp }}/ImageGlass
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: review-final-evidence-${{ matrix.mode }}
+          path: |
+            ${{ runner.temp }}/source.json
+            ${{ runner.temp }}/MagickCodec.cs
+            ${{ runner.temp }}/maintainer-review.patch
+            ${{ runner.temp }}/script-checks.json
+            ${{ runner.temp }}/publish.log
+            ${{ runner.temp }}/observations.*
+            ${{ runner.temp }}/gif-save.*
+            ${{ runner.temp }}/layer-save.*
+            ${{ runner.temp }}/review.json
+            ${{ runner.temp }}/review.log
+            ${{ runner.temp }}/review-inputs
+          if-no-files-found: error
+          retention-days: 14
