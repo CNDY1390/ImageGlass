@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+
 concurrency:
   group: pr2446-maintainer-review
   cancel-in-progress: false
@@ -96,7 +97,7 @@ jobs:
         run: |
           dotnet publish app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 -p:PublishAot=false -p:PublishReadyToRun=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:SelfContained=true -o "$env:RUNNER_TEMP/ImageGlass" 2>&1 | Tee-Object "$env:RUNNER_TEMP/publish.log"
           if ($LASTEXITCODE -ne 0) { throw 'Build/publish failed' }
-      - name: Update diagnostic assertions and build four runners
+      - name: Update diagnostic assertions to the requested Data policy and build runners
         shell: pwsh
         run: |
           ./harness/.ci/OfficialCases/add-cases.ps1

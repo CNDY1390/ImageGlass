@@ -4,6 +4,7 @@ using ImageMagick;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 internal static class Program
 {
@@ -14,6 +15,8 @@ internal static class Program
         if (!value) throw new InvalidOperationException(message);
     }
     private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes));
+    // Separate RAW reads use different native temporary filenames; compare all other diagnostic text.
+    private static string StableRawMessage(Exception error) => Regex.Replace(error.Message, "`[^']*'", "`<native temporary path>'");
     private static string Pixels(IMagickImage<float> image)
     {
         using var copy = image.Clone();
@@ -82,7 +85,6 @@ internal static class Program
         {
             await Case("module-guard/" + ext, () =>
             {
-                // Synthetic diagnostic checks the shared guard, not a claim of camera-file coverage.
                 var result = (bool)guard.Invoke(null, [new MagickCoderErrorException("synthetic libraw rejection"), new MagickReadSettings(), "fixture" + ext])!;
                 Check(result == !fixedMode, "Wrong retry eligibility for DNG module " + ext);
                 return Task.FromResult($"retry={result}; module=Dng; synthetic diagnostic");
@@ -136,11 +138,13 @@ internal static class Program
                 Check((caught is not null) == fixedMode, "Unexpected decode success/failure");
                 if (caught is not null)
                 {
-                    Check(caught.GetType() == first.GetType() && caught.Message == first.Message, "Original rejection was replaced");
+                    Console.WriteLine($"RAW DIAGNOSTICS: filename={first.Message}; helper={caught.Message}");
+                    Check(caught.GetType() == first.GetType() && StableRawMessage(caught) == StableRawMessage(first), "RAW diagnostic differs beyond its per-read temporary filename");
                     Check(!caught.Data.Contains("ImageGlass.ContentSniffFallbackException"), "Removed Data field reappeared");
+                    Check(caught.StackTrace?.Contains("ReadAsync") == true, "Original read stack missing");
                 }
                 ExclusiveOpen(rejected);
-                return fixedMode ? "original libraw rejection preserved; file released" : "old path silently accepts the rejected container as TIFF; file released";
+                return fixedMode ? "original libraw rejection preserved (only random temporary path normalized); file released" : "old path silently accepts the rejected container as TIFF; file released";
             });
         }
         await Case("rejected-raw-surrogate/save-source-read", async () =>
