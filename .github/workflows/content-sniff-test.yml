@@ -1,4 +1,4 @@
-name: Verify non-TIFF layer output on PR 2446
+name: Verify maintainer review 5199828960 on PR 2446
 
 on:
   push:
@@ -9,14 +9,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr2446-nontiff-save
+  group: pr2446-maintainer-review
   cancel-in-progress: false
 
 env:
-  SOURCE_SHA: b05f7b324824949b1972e7d72f82c208eab59d76
+  SOURCE_SHA: c5aad180e71eef4c7c6a0dea0b61646dc4eb95ed
   EXPECTED_MAGICK: 14.17.1
   SOURCE_KIND: pr-head
   TEST_MODE: fixed
+  LAYER_MODE: fixed
 
 jobs:
   compare:
@@ -27,15 +28,15 @@ jobs:
       fail-fast: false
       matrix:
         mode: [before, fixed]
-    name: Non-TIFF save ${{ matrix.mode }} - Windows x64
+    name: Maintainer review ${{ matrix.mode }} - Windows x64
     env:
-      LAYER_MODE: ${{ matrix.mode }}
+      REVIEW_MODE: ${{ matrix.mode }}
     steps:
-      - name: Checkout exact PR head b05f7b3
+      - name: Checkout exact reviewed PR head
         uses: actions/checkout@v6
         with:
           repository: CNDY1390/ImageGlass
-          ref: b05f7b324824949b1972e7d72f82c208eab59d76
+          ref: c5aad180e71eef4c7c6a0dea0b61646dc4eb95ed
           fetch-depth: 2
           path: app
           persist-credentials: false
@@ -46,42 +47,44 @@ jobs:
           path: harness
           sparse-checkout: .ci
           persist-credentials: false
-      - name: Prepare comparison and record exact source
+      - name: Apply review changes only and record exact source
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           if ((git -C app rev-parse HEAD).Trim() -ne $env:SOURCE_SHA) { throw 'Wrong source SHA' }
-          if ((git -C app rev-parse 'HEAD^{tree}').Trim() -ne 'bd7ed75f91b32fca6c0ac5dab6f5f3bb385743b7') { throw 'Wrong source tree' }
+          if ((git -C app rev-parse 'HEAD^{tree}').Trim() -ne '0cc8916365e32d6d9b336286e1b231db6ab660df') { throw 'Wrong reviewed source tree' }
           $file = 'source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs'
-          if ($env:LAYER_MODE -eq 'fixed') {
-            $patch = Join-Path $env:GITHUB_WORKSPACE 'harness/.ci/NonTiffSaveSmoke/nontiff-save.patch'
+          if ($env:REVIEW_MODE -eq 'fixed') {
+            $patch = Join-Path $env:GITHUB_WORKSPACE 'harness/.ci/MaintainerReviewSmoke/maintainer-review.patch'
             git -C app apply --check $patch
             if ($LASTEXITCODE -ne 0) { throw 'Patch check failed' }
             git -C app apply $patch
             if ($LASTEXITCODE -ne 0) { throw 'Patch apply failed' }
             $files = @(git -C app diff --name-only)
-            if ($files.Count -ne 1 -or $files[0] -ne $file) { throw 'Unexpected scope' }
+            if ($files.Count -ne 1 -or $files[0] -ne $file) { throw 'Unexpected production scope' }
             git -C app diff --check
             if ($LASTEXITCODE -ne 0) { throw 'Whitespace check failed' }
             git -C app add -- $file
             if ($LASTEXITCODE -ne 0) { throw 'Staging failed' }
+            if ((git -C app rev-parse ":$file").Trim() -ne '2289b3535f7625775eae67000955b13b625f8d6b') { throw 'Unexpected candidate codec' }
           }
           $tree = (git -C app write-tree).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Tree calculation failed' }
           "TESTED_TREE=$tree" >> $env:GITHUB_ENV
           [xml]$packages = Get-Content app/source/Directory.Packages.props
           $versions = @($packages.Project.ItemGroup.PackageVersion | Where-Object { $_.Include -like 'Magick.NET-*' } | ForEach-Object { $_.Version } | Select-Object -Unique)
           if ($versions.Count -ne 1 -or $versions[0] -ne $env:EXPECTED_MAGICK) { throw 'Unexpected dependency version' }
-          git -C app diff --cached --binary --full-index "--output=$env:RUNNER_TEMP/nontiff-save.patch" HEAD
+          git -C app diff --cached --binary --full-index "--output=$env:RUNNER_TEMP/maintainer-review.patch" HEAD
           if ($LASTEXITCODE -ne 0) { throw 'Patch export failed' }
-          git -C app diff --cached --stat HEAD
           Copy-Item "app/$file" "$env:RUNNER_TEMP/MagickCodec.cs"
           @{
             source_sha = $env:SOURCE_SHA
             source_tree = $tree
-            mode = $env:LAYER_MODE
+            mode = $env:REVIEW_MODE
             magick = $versions[0]
             codec_blob = (git -C app rev-parse ":$file").Trim()
             workflow_sha = $env:GITHUB_SHA
+            review_url = 'https://github.com/d2phap/ImageGlass/pull/2446#pullrequestreview-5199828960'
             run_url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
           } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/source.json" -Encoding utf8
           Get-Content "$env:RUNNER_TEMP/source.json"
@@ -94,12 +97,23 @@ jobs:
         run: |
           dotnet publish app/source/ImageGlass.Win32/ImageGlass.Win32.csproj -c Debug -p:Platform=x64 -p:PublishAot=false -p:PublishReadyToRun=false -p:PublishSingleFile=false -p:PublishTrimmed=false -p:SelfContained=true -o "$env:RUNNER_TEMP/ImageGlass" 2>&1 | Tee-Object "$env:RUNNER_TEMP/publish.log"
           if ($LASTEXITCODE -ne 0) { throw 'Build/publish failed' }
-      - name: Build regression runners
+      - name: Update diagnostic assertions to the requested Data policy and build runners
         shell: pwsh
         run: |
           ./harness/.ci/OfficialCases/add-cases.ps1
+          $path = 'harness/.ci/NonTiffSaveSmoke/Program.cs'
+          $text = [IO.File]::ReadAllText($path)
+          $old = 'Check(caught.Data["ImageGlass.ContentSniffFallbackException"] is Exception, "Retry error was lost");'
+          $new = 'Check((caught.Data["ImageGlass.ContentSniffFallbackException"] is Exception) == (Environment.GetEnvironmentVariable("REVIEW_MODE") != "fixed"), "Unexpected fallback Data policy");'
+          if (-not $text.Contains($old)) { throw 'Diagnostic assertion not found' }
+          $text = $text.Replace($old, $new)
+          $old = 'caught.Data["ImageGlass.ContentSniffFallbackException"]!.GetType().Name'
+          $new = '(caught.Data["ImageGlass.ContentSniffFallbackException"]?.GetType().Name ?? "not recorded per review")'
+          if (-not $text.Contains($old)) { throw 'Diagnostic display not found' }
+          $text = $text.Replace($old, $new)
+          [IO.File]::WriteAllText($path, $text)
           $project = Join-Path $env:GITHUB_WORKSPACE 'app/source/ImageGlass.Lib/ImageGlass.Lib.csproj'
-          foreach ($runner in @('BaseMergeSmoke', 'GifSaveSmoke', 'NonTiffSaveSmoke')) {
+          foreach ($runner in @('BaseMergeSmoke', 'GifSaveSmoke', 'NonTiffSaveSmoke', 'MaintainerReviewSmoke')) {
             dotnet build "harness/.ci/$runner/$runner.csproj" -c Debug -p:Platform=x64 -p:PublishAot=false "-p:ImageGlassProject=$project" -o "$env:RUNNER_TEMP/$runner" 2>&1 | Tee-Object "$env:RUNNER_TEMP/$runner-build.log"
             if ($LASTEXITCODE -ne 0) { throw "Runner build failed: $runner" }
             Copy-Item "$env:RUNNER_TEMP/ImageGlass/ImageGlass.Lib.dll" "$env:RUNNER_TEMP/$runner" -Force
@@ -110,46 +124,48 @@ jobs:
         run: |
           $env:OFFICIAL_CASES = Join-Path $env:GITHUB_WORKSPACE 'harness/.ci/OfficialCases/cases.json'
           dotnet "$env:RUNNER_TEMP/BaseMergeSmoke/BaseMergeSmoke.dll" "$env:RUNNER_TEMP/fixtures" "$env:RUNNER_TEMP/observations.json" 2>&1 | Tee-Object "$env:RUNNER_TEMP/observations.log"
-          if ($LASTEXITCODE -ne 0) { throw 'Decoding regression checks failed' }
-      - name: Existing GIF and ICO save checks
+          if ($LASTEXITCODE -ne 0) { throw 'Decoding regression failed' }
+      - name: Existing GIF and ICO saving regression
         shell: pwsh
         run: |
           dotnet "$env:RUNNER_TEMP/GifSaveSmoke/GifSaveSmoke.dll" "$env:RUNNER_TEMP/gif-inputs" "$env:RUNNER_TEMP/gif-results" "$env:RUNNER_TEMP/gif-save.json" "$env:RUNNER_TEMP/fixtures/png-first-frame.ico" 2>&1 | Tee-Object "$env:RUNNER_TEMP/gif-save.log"
-          if ($LASTEXITCODE -ne 0) { throw 'GIF regression checks failed' }
-      - name: Standard TIFF pages and diagnostic assertions
+          if ($LASTEXITCODE -ne 0) { throw 'GIF saving regression failed' }
+      - name: Standard TIFF pages and original error preservation
         shell: pwsh
         run: |
           dotnet "$env:RUNNER_TEMP/NonTiffSaveSmoke/NonTiffSaveSmoke.dll" "$env:RUNNER_TEMP/layer-inputs" "$env:RUNNER_TEMP/layer-results" "$env:RUNNER_TEMP/layer-save.json" "$env:RUNNER_TEMP/fixtures" "$env:RUNNER_TEMP/gif-results" 2>&1 | Tee-Object "$env:RUNNER_TEMP/layer-save.log"
-          if ($LASTEXITCODE -ne 0) { throw 'Non-TIFF save/diagnostic checks failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'TIFF/diagnostic regression failed' }
+      - name: DNG module exclusions and rejected-RAW surrogate
+        shell: pwsh
+        run: |
+          dotnet "$env:RUNNER_TEMP/MaintainerReviewSmoke/MaintainerReviewSmoke.dll" "$env:RUNNER_TEMP/review-inputs" "$env:RUNNER_TEMP/review.json" 2>&1 | Tee-Object "$env:RUNNER_TEMP/review.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Maintainer review checks failed' }
           git -C app diff --exit-code
-          if ($LASTEXITCODE -ne 0) { throw 'Source changed after staging' }
+          if ($LASTEXITCODE -ne 0) { throw 'Production changed after staging' }
           if ((git -C app write-tree).Trim() -ne $env:TESTED_TREE) { throw 'Tested tree changed' }
-          Get-Content "$env:RUNNER_TEMP/layer-save.log" | ForEach-Object { $_ >> $env:GITHUB_STEP_SUMMARY }
-      - name: Package candidate and manual samples
+          Get-Content "$env:RUNNER_TEMP/review.log" | ForEach-Object { $_ >> $env:GITHUB_STEP_SUMMARY }
+      - name: Package isolated test application and files
         if: matrix.mode == 'fixed'
         shell: pwsh
         run: |
           $output = Join-Path $env:RUNNER_TEMP 'ImageGlass'
           $samples = Join-Path $env:RUNNER_TEMP 'manual-tests'
-          Copy-Item "$env:RUNNER_TEMP/layer-inputs" $samples -Recurse -Force
+          New-Item -ItemType Directory -Force $samples | Out-Null
+          Copy-Item "$env:RUNNER_TEMP/review-inputs/09-control.tiff", "$env:RUNNER_TEMP/review-inputs/09-rejected-raw-container.dng", "$env:RUNNER_TEMP/fixtures/01-png-as-tif.tif", "$env:RUNNER_TEMP/fixtures/04-two-frame-gif-as-tif.tif", "$env:RUNNER_TEMP/layer-inputs/08-two-full-frames-webp-as-tif.tif" $samples
+          Copy-Item "$env:RUNNER_TEMP/fixtures/png-first-frame.ico" "$samples/05-valid-png-compressed.ico"
           @(
-            'PR 2446: b05f7b3 plus the non-TIFF write-layers cleanup patch.',
-            'Close old ImageGlass windows. Extract the application into a new folder and run its ImageGlass.exe.',
-            'Open 08-two-full-frames-webp-as-tif.tif, Save As a NEW result.tiff, then reopen it.',
-            'Expected: two full 32x24 pages, red then blue. Ctrl+Right switches pages.',
-            'reference/08-original.webp contains identical bytes with the correct extension.',
-            'The automated test reads TIFF with IgnoreLayers=true: default frame count alone can include Photoshop layers and miss the bug.',
-            'Do not overwrite inputs. True-TIFF files in reference/ are existing-behavior controls, not new regression claims.',
-            'GUI, in-flight cancellation, hidden native I/O faults, real RAW, PS/PDF and Release/AOT were not tested.'
+            'PR 2446 maintainer review 5199828960: c5aad180 plus maintainer-review.patch.',
+            '09-rejected-raw-container.dng contains ordinary TIFF bytes, not a real camera RAW. It must stay rejected by the RAW decoder.',
+            'The automated test enters DecodeImageAsync and SaveAsync directly. A GUI open can reject the surrogate in metadata probing even before the fix, so GUI failure alone does not prove the new guard ran.',
+            '09-control.tiff must open. 01-png-as-tif.tif and 04-two-frame-gif-as-tif.tif must still open; the ICO must still have four sizes.',
+            'The WebP-as-TIF standard-page save regression is checked automatically with IgnoreLayers=true.',
+            'Real camera RAW, GUI, in-flight cancellation, Release/AOT and other platforms have not been tested in this run.'
           ) | Set-Content "$samples/README.txt" -Encoding utf8
-          Get-ChildItem $samples -Recurse -File | Sort-Object FullName | ForEach-Object {
-            $relative = [IO.Path]::GetRelativePath($samples, $_.FullName).Replace('\', '/')
-            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $relative"
-          } | Set-Content "$samples/SHA256SUMS.txt" -Encoding utf8
+          Get-ChildItem $samples -File | Sort-Object Name | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" } | Set-Content "$samples/SHA256SUMS.txt" -Encoding utf8
           Copy-Item 'app/source/__assets/__app/*' $output -Recurse -Force
           [IO.File]::WriteAllBytes((Join-Path $output '.igportable'), [byte[]]@())
           @{
-            _Metadata = @{ Description = 'PR 2446 isolated non-TIFF save test'; Version = 10 }
+            _Metadata = @{ Description = 'PR 2446 maintainer review test'; Version = 10 }
             QuickSetupVersion = 10
             AutoUpdate = '0'
             EnableMultiInstances = $true
@@ -159,14 +175,14 @@ jobs:
             EnableGalleryShellThumbnail = $false
           } | ConvertTo-Json | Set-Content "$output/igconfig.json" -Encoding utf8
           Copy-Item $samples "$output/_test_samples" -Recurse -Force
-          New-Item -ItemType Directory -Path "$output/_test_results" -Force | Out-Null
-          Copy-Item "$env:RUNNER_TEMP/source.json", "$env:RUNNER_TEMP/observations.json", "$env:RUNNER_TEMP/gif-save.json", "$env:RUNNER_TEMP/layer-save.json", "$env:RUNNER_TEMP/layer-save.log" "$output/_test_results"
-          @("Source: $env:SOURCE_SHA + nontiff-save.patch", "Tree: $env:TESTED_TREE", "Magick.NET: $env:EXPECTED_MAGICK", "Run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID", 'Not an official release; source remains unchanged on the PR branch.') | Set-Content "$output/TEST-BUILD.txt" -Encoding utf8
+          New-Item -ItemType Directory -Force "$output/_test_results" | Out-Null
+          Copy-Item "$env:RUNNER_TEMP/source.json", "$env:RUNNER_TEMP/observations.json", "$env:RUNNER_TEMP/gif-save.json", "$env:RUNNER_TEMP/layer-save.json", "$env:RUNNER_TEMP/review.json", "$env:RUNNER_TEMP/review.log" "$output/_test_results"
+          @("Source: $env:SOURCE_SHA + maintainer-review.patch", "Tree: $env:TESTED_TREE", "Magick.NET: $env:EXPECTED_MAGICK", "Run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID", 'Not an official release.') | Set-Content "$output/TEST-BUILD.txt" -Encoding utf8
       - name: Upload Windows application
         if: matrix.mode == 'fixed'
         uses: actions/upload-artifact@v7
         with:
-          name: ImageGlass-nontiff-save-fixed-win-x64
+          name: ImageGlass-maintainer-review-win-x64
           path: ${{ runner.temp }}/ImageGlass
           include-hidden-files: true
           if-no-files-found: error
@@ -175,7 +191,7 @@ jobs:
         if: matrix.mode == 'fixed'
         uses: actions/upload-artifact@v7
         with:
-          name: ImageGlass-nontiff-save-test-files
+          name: ImageGlass-maintainer-review-test-files
           path: ${{ runner.temp }}/manual-tests
           if-no-files-found: error
           retention-days: 14
@@ -183,11 +199,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: nontiff-save-evidence-${{ matrix.mode }}
+          name: maintainer-review-evidence-${{ matrix.mode }}
           path: |
             ${{ runner.temp }}/source.json
             ${{ runner.temp }}/MagickCodec.cs
-            ${{ runner.temp }}/nontiff-save.patch
+            ${{ runner.temp }}/maintainer-review.patch
             ${{ runner.temp }}/*-build.log
             ${{ runner.temp }}/publish.log
             ${{ runner.temp }}/observations.json
@@ -196,6 +212,8 @@ jobs:
             ${{ runner.temp }}/gif-save.log
             ${{ runner.temp }}/layer-save.json
             ${{ runner.temp }}/layer-save.log
-            ${{ runner.temp }}/layer-results
+            ${{ runner.temp }}/review.json
+            ${{ runner.temp }}/review.log
+            ${{ runner.temp }}/review-inputs
           if-no-files-found: warn
           retention-days: 14
