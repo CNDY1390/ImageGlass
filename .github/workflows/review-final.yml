@@ -43,11 +43,19 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($name in @('maintainer-review.patch','Submit.ps1')) {
+            $path = Join-Path $env:GITHUB_WORKSPACE "harness/.ci/MaintainerReviewSmoke/$name"
+            [IO.File]::WriteAllText($path, [IO.File]::ReadAllText($path).Replace("`r`n", "`n"), [Text.UTF8Encoding]::new($false))
+          }
           if ((git -C app rev-parse HEAD).Trim() -ne $env:SOURCE_SHA) { throw 'Wrong source commit' }
           if ((git -C app rev-parse 'HEAD^{tree}').Trim() -ne '0cc8916365e32d6d9b336286e1b231db6ab660df') { throw 'Wrong base tree' }
           $file = 'source/ImageGlass.Lib/Common/Photoing/Codecs/MagickCodecs/MagickCodec.cs'
           if ($env:REVIEW_MODE -eq 'fixed') {
-            git -C app apply --index "$env:GITHUB_WORKSPACE/harness/.ci/MaintainerReviewSmoke/maintainer-review.patch"
+            git -C app apply --check "$env:GITHUB_WORKSPACE/harness/.ci/MaintainerReviewSmoke/maintainer-review.patch"
+            if ($LASTEXITCODE -ne 0) { throw 'Patch check failed' }
+            git -C app apply "$env:GITHUB_WORKSPACE/harness/.ci/MaintainerReviewSmoke/maintainer-review.patch"
+            if ($LASTEXITCODE -ne 0) { throw 'Patch apply failed' }
+            git -C app add -- $file
             if ($LASTEXITCODE -ne 0) { throw 'Patch failed' }
           }
           $tree = (git -C app write-tree).Trim()
@@ -172,3 +180,5 @@ jobs:
             ${{ runner.temp }}/review-inputs
           if-no-files-found: error
           retention-days: 14
+
+# Submission commands invoke the resolved git executable, never a same-name function.
