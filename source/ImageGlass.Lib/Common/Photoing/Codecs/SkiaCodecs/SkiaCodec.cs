@@ -978,6 +978,42 @@ public static partial class SkiaCodec
 
 
     /// <summary>
+    /// Creates an <see cref="SKColorSpace"/> from ICC data; <see langword="null"/> if Skia cannot parse it.
+    /// </summary>
+    public static SKColorSpace? CreateIccColorSpace(SKData? iccData)
+    {
+        if (iccData is null || iccData.IsEmpty) return null;
+
+        try
+        {
+            var profile = SKColorSpaceIccProfile.Create(iccData);
+            if (profile is null) return null;
+
+            var colorSpace = SKColorSpace.CreateIcc(profile);
+            if (colorSpace is null) profile.Dispose();
+
+            return colorSpace;
+        }
+        catch { return null; }
+    }
+
+
+    /// <summary>
+    /// Creates an <see cref="SKColorSpace"/> from raw ICC bytes.
+    /// </summary>
+    public static SKColorSpace? CreateIccColorSpace(ReadOnlySpan<byte> iccData)
+    {
+        if (iccData.IsEmpty) return null;
+
+        var data = SKData.CreateCopy(iccData);
+        var colorSpace = CreateIccColorSpace(data);
+        if (colorSpace is null) data.Dispose();
+
+        return colorSpace;
+    }
+
+
+    /// <summary>
     /// Gets Skia color profile.
     /// </summary>
     /// <param name="name">Name or Full path of color profile</param>
@@ -997,7 +1033,7 @@ public static partial class SkiaCodec
                 return results;
 
             using var data = SKData.Create(Core.ColorProfileProvider.ProfilePath);
-            results.ColorSpace = SKColorSpace.CreateIcc(data);
+            results.ColorSpace = CreateIccColorSpace(data);
             results.IsSupported = results.ColorSpace is not null; // Skia does not support all profiles
 
             return results;
@@ -1008,7 +1044,7 @@ public static partial class SkiaCodec
         var magickProfile = MagickCodec.GetBuiltinColorProfile(name);
         if (magickProfile is not null)
         {
-            results.ColorSpace = SKColorSpace.CreateIcc(magickProfile.ToReadOnlySpan());
+            results.ColorSpace = CreateIccColorSpace(magickProfile.ToReadOnlySpan());
             results.IsSupported = results.ColorSpace is not null;
 
             return results;
@@ -1019,7 +1055,7 @@ public static partial class SkiaCodec
         if (Path.Exists(name))
         {
             using var data = SKData.Create(name);
-            results.ColorSpace = SKColorSpace.CreateIcc(data);
+            results.ColorSpace = CreateIccColorSpace(data);
             results.IsSupported = results.ColorSpace is not null;
 
             return results;

@@ -144,10 +144,13 @@ public partial class PhotoManager
     /// </summary>
     /// <param name="keepIndexes">Indexes that must stay decoded.</param>
     /// <param name="excludePhoto">An extra photo to leave decoded, matched by reference.</param>
+    /// <param name="keepCurrent">
+    /// Re-reads <see cref="CurrentIndex"/> per item, so navigating mid-sweep cannot unload the viewer's photo.
+    /// </param>
     /// <remarks>
     /// Walks the whole list: a pass cancelled mid-load leaves photos decoded but untracked, and nothing else frees them.
     /// </remarks>
-    private void UnloadPhotosOutside(HashSet<int> keepIndexes, Photo? excludePhoto)
+    private void UnloadPhotosOutside(HashSet<int> keepIndexes, Photo? excludePhoto, bool keepCurrent = false)
     {
         Photo[] snapshot;
         lock (_lock)
@@ -158,6 +161,7 @@ public partial class PhotoManager
         for (var i = 0; i < snapshot.Length; i++)
         {
             if (keepIndexes.Contains(i)) continue;
+            if (keepCurrent && i == CurrentIndex) continue;
 
             var photo = snapshot[i];
             if (photo.State != PhotoState.Loaded) continue;
@@ -320,7 +324,7 @@ public partial class PhotoManager
 
             // evict whatever the budget did not keep, whichever codec decoded it; the viewer owns center/current
             var keepIndexes = new HashSet<int>(newCachedSet) { centerIndex, CurrentIndex };
-            UnloadPhotosOutside(keepIndexes, null);
+            UnloadPhotosOutside(keepIndexes, null, keepCurrent: true);
         }
         catch (OperationCanceledException) { /* expected on navigation */ }
         catch (Exception ex)

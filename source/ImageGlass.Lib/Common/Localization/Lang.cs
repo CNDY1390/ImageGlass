@@ -835,6 +835,9 @@ public class Lang
         new(LangId.Menu_MnuUpgradeLicense_BuyOnline, "Buy online…"), // v10.0
         new(LangId.Menu_MnuUpgradeLicense_ViewFeatures, "View Pro features"), // v10.0
         new(LangId.Menu_MnuUpgradeLicense_OutOfScope, "Your {0} license covers ImageGlass {1}, not ImageGlass {2}. Upgrade your license to turn Pro back on."), // v10.0
+        new(LangId.Menu_MnuUpgradeLicense_Expired, "Your {0} license expired on {1}, and ImageGlass has switched to the Classic edition. Purchase a new license or import a renewal to reactivate Pro features."), // v10.0
+        new(LangId.Menu_MnuUpgradeLicense_ExpiredTitle, "Your license is expired"), // v10.0
+        new(LangId.Menu_MnuUpgradeLicense_SwitchToClassic, "Switch to Classic edition"), // v10.0
 
         new(LangId.Menu_MnuManageLicense, "Manage license"), // v10.0
         new(LangId.Menu_MnuManageLicense_ChangeLicense, "Change license file…"), // v10.0
@@ -866,6 +869,7 @@ public class Lang
         new(LangId.Menu_MnuCheckForUpdate_CurrentVersion, "Current version: {0}" ), //v9.0
         new(LangId.Menu_MnuCheckForUpdate_LatestVersion, "The latest version: {0}" ), //v9.0
         new(LangId.Menu_MnuCheckForUpdate_PublishedDate, "Published date: {0}" ), //v9.0
+        new(LangId.Menu_MnuCheckForUpdate_ProFromStore, "Get ImageGlass Pro from Store"), // v10.0
 
         new(LangId.Menu_MnuSetDefaultPhotoViewer, "Set default photo viewer"), //v9.0
         new(LangId.Menu_MnuSetDefaultPhotoViewer_Success, "You have successfully set ImageGlass as default photo viewer."), //v9.0

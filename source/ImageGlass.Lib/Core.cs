@@ -239,6 +239,12 @@ public static class Core
 
 
     /// <summary>
+    /// A signature-verified license past its expiry, or null. Drives the expired-license prompt.
+    /// </summary>
+    public static LicenseInfo? ExpiredLicense { get; set; }
+
+
+    /// <summary>
     /// Whether Pro features are unlocked (a valid license is active).
     /// </summary>
     public static bool IsProEnabled => AppLicense is not null;

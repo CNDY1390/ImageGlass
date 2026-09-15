@@ -331,6 +331,7 @@ public enum ResxIconId
     IconPlaceholder,
     IconWeatherMoon,
     IconWeatherSunny,
+    IconProStar,
 }
 
 
