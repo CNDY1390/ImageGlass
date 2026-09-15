@@ -8,6 +8,7 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
   <ItemGroup>
+    <Using Include="ImageGlass.Common.Types" />
     <ProjectReference Include="$(ImageGlassProject)" />
   </ItemGroup>
 </Project>
